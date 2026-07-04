@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 from collections import defaultdict
 from anthropic import Anthropic
@@ -52,7 +53,6 @@ Keyin BUNDAY yoz:
 "Juda yaxshi, [ism aka/opa]! 🙌
 
 To'lov qilish uchun rekvizitlar:
-rekvizitlar butun chat davomida 1 marta ishlatilsin, qachonki mijoz qayta rekizit so'raganda yubor, boshqa hech qachon yuborma!
 
 💳 **Payme yoki Click** ilovasini oching
 🔍 Qidiruvda: **Mirage game club** deb qidiring
@@ -148,10 +148,26 @@ async def owner_reply_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not replied:
         return False
 
+    # 1. Avval xotiradagi mapping'dan qidiramiz (tez usul)
     user_chat_id = owner_notifications.get(replied.message_id)
+
+    # 2. Topilmasa — bildirishnoma matnidan ID'ni ajratib olamiz
+    # (bot qayta ishga tushgan bo'lsa ham ishlaydi)
+    if not user_chat_id and replied.text:
+        match = re.search(r"🆔\s+`?(\d+)`?", replied.text)
+        if match:
+            user_chat_id = int(match.group(1))
+
     if not user_chat_id:
         await update.message.reply_text(
             "⚠️ Bu xabar mijozga bog'lanmagan. Faqat bot yuborgan bildirishnomalarga reply qiling."
+        )
+        return True
+
+    # O'zimizga o'zimiz yubormaymiz (test paytida ega o'ziga xabar yuborsa loop bo'lmasin)
+    if user_chat_id == OWNER_CHAT_ID:
+        await update.message.reply_text(
+            "ℹ️ Bu bildirishnoma sizning o'zingiz haqingizda. Boshqa mijoz bilan sinab ko'ring."
         )
         return True
 
