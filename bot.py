@@ -149,23 +149,31 @@ async def owner_reply_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not replied:
         return False
 
+    # Diagnostika uchun log
+    replied_text = replied.text or replied.caption or ""
+    logging.info(f"OWNER REPLY: replied_msg_id={replied.message_id}, "
+                 f"replied_text[:100]={replied_text[:100]!r}")
+
     # 1. Avval xotiradagi mapping'dan qidiramiz (tez usul)
     user_chat_id = owner_notifications.get(replied.message_id)
+    logging.info(f"OWNER REPLY: from_memory={user_chat_id}")
 
     # 2. Topilmasa — bildirishnoma matnidan ID'ni ajratib olamiz
     # (bot qayta ishga tushgan bo'lsa ham ishlaydi)
-    if not user_chat_id and replied.text:
-        match = re.search(r"🆔\s+`?(\d+)`?", replied.text)
+    if not user_chat_id and replied_text:
+        match = re.search(r"🆔\s*`?\s*(\d{5,})\s*`?", replied_text)
         if match:
             user_chat_id = int(match.group(1))
+            logging.info(f"OWNER REPLY: from_regex={user_chat_id}")
 
     if not user_chat_id:
         await update.message.reply_text(
-            "⚠️ Bu xabar mijozga bog'lanmagan. Faqat bot yuborgan bildirishnomalarga reply qiling."
+            "⚠️ Bu xabar mijozga bog'lanmagan. Faqat bot yuborgan bildirishnomalarga reply qiling.\n\n"
+            f"Debug: replied_text[:200]={replied_text[:200]!r}"
         )
         return True
 
-    # O'zimizga o'zimiz yubormaymiz (test paytida ega o'ziga xabar yuborsa loop bo'lmasin)
+    # O'zimizga o'zimiz yubormaymiz
     if user_chat_id == OWNER_CHAT_ID:
         await update.message.reply_text(
             "ℹ️ Bu bildirishnoma sizning o'zingiz haqingizda. Boshqa mijoz bilan sinab ko'ring."
@@ -174,13 +182,24 @@ async def owner_reply_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     text = update.message.text
     try:
-        await context.bot.send_message(chat_id=user_chat_id, text=text)
+        sent = await context.bot.send_message(chat_id=user_chat_id, text=text)
         # Mijozning suhbat tarixiga qo'shamiz (Claude keyinchalik kontekstni bilsin)
         conversations[user_chat_id].append({"role": "assistant", "content": text})
-        await update.message.reply_text("✅ Yuborildi")
+        await update.message.reply_text(
+            f"✅ Yuborildi\n"
+            f"👤 Mijoz ID: `{user_chat_id}`\n"
+            f"📩 Xabar ID: `{sent.message_id}`",
+            parse_mode="Markdown",
+        )
+        logging.info(f"OWNER REPLY: sent to {user_chat_id} successfully, msg_id={sent.message_id}")
     except Exception as e:
         logging.error(f"Egadan mijozga yuborishda xatolik: {e}")
-        await update.message.reply_text(f"❌ Yuborilmadi: {e}")
+        await update.message.reply_text(
+            f"❌ Yuborilmadi\n"
+            f"👤 Mijoz ID: `{user_chat_id}`\n"
+            f"⚠️ Xatolik: {e}",
+            parse_mode="Markdown",
+        )
 
     return True
 
