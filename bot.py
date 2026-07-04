@@ -12,8 +12,9 @@ Xususiyatlari:
 import os
 import re
 import base64
+import sqlite3
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from anthropic import Anthropic
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -38,6 +39,12 @@ OWNER_CHAT_ID = int(os.environ["OWNER_CHAT_ID"].strip())
 # B) CHANNEL_LINK (agar CHANNEL_ID yoq bolsa) → hammaga bir xil oddiy link
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()  # -100xxxxxxxxx (kanal ID)
 CHANNEL_LINK = os.environ.get("CHANNEL_LINK", "").strip()  # oddiy invite link (fallback)
+
+# SQLite baza yoli (Railway Volume ishlatilsa: /data/bot.db)
+DB_PATH = os.environ.get("DB_PATH", "bot.db").strip()
+
+# Har bir mijoz uchun mahsulot narxi (statistika hisoblash uchun)
+PRICE_PER_SALE = 39000
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -155,6 +162,313 @@ user_state: dict[int, dict] = defaultdict(dict)
 
 
 # =========================================================================
+# SQLITE BAZA
+# =========================================================================
+
+def db_conn():
+    """Yangi ulanish."""
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def db_init():
+    """Barcha jadvallarni yaratish (mavjud bo'lmasa)."""
+    conn = db_conn()
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                chat_id INTEGER PRIMARY KEY,
+                first_name TEXT,
+                last_name TEXT,
+                username TEXT,
+                paid INTEGER DEFAULT 0,
+                paid_at TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_message_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                role TEXT,
+                content TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id);
+
+            CREATE TABLE IF NOT EXISTS notifications (
+                notif_msg_id INTEGER PRIMARY KEY,
+                user_chat_id INTEGER,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS followups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_chat_id INTEGER,
+                reminder_type TEXT,
+                fire_at TEXT,
+                sent INTEGER DEFAULT 0,
+                cancelled INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS receipts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_chat_id INTEGER,
+                is_valid INTEGER,
+                has_ai_darslik INTEGER,
+                confirmed INTEGER DEFAULT 0,
+                verify_info TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        conn.commit()
+        logger.info(f"DB tayyor: {DB_PATH}")
+    finally:
+        conn.close()
+
+
+def db_upsert_user(update: Update):
+    """Mijozni bazaga qo'shish yoki yangilash."""
+    u = update.effective_user
+    now = datetime.now(timezone.utc).isoformat()
+    conn = db_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO users (chat_id, first_name, last_name, username, last_message_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                first_name=excluded.first_name,
+                last_name=excluded.last_name,
+                username=excluded.username,
+                last_message_at=excluded.last_message_at
+            """,
+            (u.id, u.first_name, u.last_name, u.username, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_add_message(chat_id: int, role: str, content: str):
+    """Suhbat tarixiga xabar qo'shish."""
+    conn = db_conn()
+    try:
+        conn.execute(
+            "INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)",
+            (chat_id, role, content),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_get_conversation(chat_id: int, limit: int = 20) -> list:
+    """Mijozning oxirgi N xabarlari (Claude uchun)."""
+    conn = db_conn()
+    try:
+        rows = conn.execute(
+            "SELECT role, content FROM messages WHERE chat_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+        return [
+            {"role": r["role"], "content": r["content"]} for r in reversed(rows)
+        ]
+    finally:
+        conn.close()
+
+
+def db_clear_conversation(chat_id: int):
+    """Mijoz suhbati tarixini tozalash."""
+    conn = db_conn()
+    try:
+        conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_mark_paid(chat_id: int):
+    """Mijozni to'lagan deb belgilash."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = db_conn()
+    try:
+        conn.execute(
+            "UPDATE users SET paid = 1, paid_at = ? WHERE chat_id = ?",
+            (now, chat_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_is_paid(chat_id: int) -> bool:
+    conn = db_conn()
+    try:
+        row = conn.execute(
+            "SELECT paid FROM users WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+        return bool(row and row["paid"])
+    finally:
+        conn.close()
+
+
+def db_get_first_name(chat_id: int) -> str:
+    conn = db_conn()
+    try:
+        row = conn.execute(
+            "SELECT first_name FROM users WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+        return (row["first_name"] if row else "") or ""
+    finally:
+        conn.close()
+
+
+def db_save_notification(notif_msg_id: int, user_chat_id: int):
+    conn = db_conn()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO notifications (notif_msg_id, user_chat_id) VALUES (?, ?)",
+            (notif_msg_id, user_chat_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_get_notification_user(notif_msg_id: int) -> int | None:
+    conn = db_conn()
+    try:
+        row = conn.execute(
+            "SELECT user_chat_id FROM notifications WHERE notif_msg_id = ?",
+            (notif_msg_id,),
+        ).fetchone()
+        return row["user_chat_id"] if row else None
+    finally:
+        conn.close()
+
+
+def db_save_followup(user_chat_id: int, reminder_type: str, fire_at: datetime) -> int:
+    conn = db_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO followups (user_chat_id, reminder_type, fire_at) VALUES (?, ?, ?)",
+            (user_chat_id, reminder_type, fire_at.isoformat()),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def db_cancel_followups(user_chat_id: int):
+    conn = db_conn()
+    try:
+        conn.execute(
+            "UPDATE followups SET cancelled = 1 "
+            "WHERE user_chat_id = ? AND sent = 0 AND cancelled = 0",
+            (user_chat_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_pending_followups() -> list:
+    """Bot restart bolganda tiklash uchun kutayotgan follow-up'lar."""
+    conn = db_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, user_chat_id, reminder_type, fire_at FROM followups "
+            "WHERE sent = 0 AND cancelled = 0"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def db_mark_followup_sent(followup_id: int):
+    conn = db_conn()
+    try:
+        conn.execute("UPDATE followups SET sent = 1 WHERE id = ?", (followup_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_save_receipt(
+    user_chat_id: int,
+    is_valid: bool,
+    has_ai_darslik: bool,
+    verify_info: str,
+) -> int:
+    conn = db_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO receipts (user_chat_id, is_valid, has_ai_darslik, verify_info) "
+            "VALUES (?, ?, ?, ?)",
+            (user_chat_id, int(is_valid), int(has_ai_darslik), verify_info),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def db_stats() -> dict:
+    """Umumiy statistika: bugun, hafta, jami."""
+    conn = db_conn()
+    try:
+        c = conn.execute
+
+        total_users = c("SELECT COUNT(*) as n FROM users").fetchone()["n"]
+        paid_users = c("SELECT COUNT(*) as n FROM users WHERE paid=1").fetchone()["n"]
+
+        today_users = c(
+            "SELECT COUNT(*) as n FROM users WHERE date(created_at) = date('now')"
+        ).fetchone()["n"]
+        today_paid = c(
+            "SELECT COUNT(*) as n FROM users WHERE date(paid_at) = date('now')"
+        ).fetchone()["n"]
+
+        week_users = c(
+            "SELECT COUNT(*) as n FROM users "
+            "WHERE date(created_at) >= date('now', '-7 days')"
+        ).fetchone()["n"]
+        week_paid = c(
+            "SELECT COUNT(*) as n FROM users "
+            "WHERE date(paid_at) >= date('now', '-7 days')"
+        ).fetchone()["n"]
+
+        total_receipts = c(
+            "SELECT COUNT(*) as n FROM receipts WHERE is_valid=1"
+        ).fetchone()["n"]
+
+        conv = (paid_users / total_users * 100) if total_users else 0
+
+        return {
+            "total_users": total_users,
+            "paid_users": paid_users,
+            "today_users": today_users,
+            "today_paid": today_paid,
+            "week_users": week_users,
+            "week_paid": week_paid,
+            "total_receipts": total_receipts,
+            "revenue_today": today_paid * PRICE_PER_SALE,
+            "revenue_week": week_paid * PRICE_PER_SALE,
+            "revenue_total": paid_users * PRICE_PER_SALE,
+            "conversion_pct": conv,
+        }
+    finally:
+        conn.close()
+
+
+# =========================================================================
 # YORDAMCHI FUNKSIYALAR
 # =========================================================================
 
@@ -192,6 +506,7 @@ async def notify_owner(
             chat_id=OWNER_CHAT_ID, text=text, reply_markup=reply_markup
         )
         notif_to_user[msg.message_id] = user_chat_id
+        db_save_notification(msg.message_id, user_chat_id)  # Doimiy saqlash
         logger.info(
             f"notify_owner OK: notif_msg_id={msg.message_id} -> user={user_chat_id}"
         )
@@ -263,12 +578,13 @@ async def followup_reminder(context: ContextTypes.DEFAULT_TYPE):
     job_data = context.job.data
     user_id = job_data["user_id"]
     reminder_type = job_data["type"]  # "24h" yoki "48h"
+    db_id = job_data.get("db_id")
 
-    state = user_state.get(user_id, {})
-
-    # Agar mijoz allaqachon to'lagan bo'lsa — eslatma kerak emas
-    if state.get("paid"):
+    # DB'dan qat'iy tekshirish: to'lagan bo'lsa yubormaymiz
+    if db_is_paid(user_id) or user_state.get(user_id, {}).get("paid"):
         logger.info(f"followup skipped (paid): user={user_id}, type={reminder_type}")
+        if db_id:
+            db_mark_followup_sent(db_id)
         return
 
     # Ismini bilsak — chaqiramiz
@@ -297,6 +613,8 @@ async def followup_reminder(context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await context.bot.send_message(chat_id=user_id, text=text)
+        if db_id:
+            db_mark_followup_sent(db_id)
         logger.info(f"followup sent: user={user_id}, type={reminder_type}")
 
         # Egaga ham xabar (nazorat uchun)
@@ -332,31 +650,40 @@ def schedule_followups(
     # Eski job'larni bekor qilamiz (dublikatga yo'l qo'ymaslik uchun)
     for job in context.job_queue.get_jobs_by_name(f"followup_{user_id}"):
         job.schedule_removal()
+    db_cancel_followups(user_id)
+
+    now = datetime.now(timezone.utc)
+    fire_24 = now + timedelta(hours=24)
+    fire_48 = now + timedelta(hours=48)
+
+    # DB ga saqlaymiz (restart bo'lsa tiklash uchun)
+    id_24 = db_save_followup(user_id, "24h", fire_24)
+    id_48 = db_save_followup(user_id, "48h", fire_48)
 
     # 24 soatlik eslatma
     context.job_queue.run_once(
         followup_reminder,
         when=timedelta(hours=24),
-        data={"user_id": user_id, "type": "24h"},
+        data={"user_id": user_id, "type": "24h", "db_id": id_24},
         name=f"followup_{user_id}",
     )
     # 48 soatlik eslatma
     context.job_queue.run_once(
         followup_reminder,
         when=timedelta(hours=48),
-        data={"user_id": user_id, "type": "48h"},
+        data={"user_id": user_id, "type": "48h", "db_id": id_48},
         name=f"followup_{user_id}",
     )
-    logger.info(f"followups scheduled for user={user_id}")
+    logger.info(f"followups scheduled for user={user_id}, ids=({id_24}, {id_48})")
 
 
 def cancel_followups(context: ContextTypes.DEFAULT_TYPE, user_id: int):
     """Mijoz to'lagach barcha follow-up eslatmalarni bekor qilish."""
-    if context.job_queue is None:
-        return
-    for job in context.job_queue.get_jobs_by_name(f"followup_{user_id}"):
-        job.schedule_removal()
+    if context.job_queue is not None:
+        for job in context.job_queue.get_jobs_by_name(f"followup_{user_id}"):
+            job.schedule_removal()
     user_state[user_id]["paid"] = True
+    db_cancel_followups(user_id)
     logger.info(f"followups cancelled (paid) for user={user_id}")
 
 
@@ -425,6 +752,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mijoz /start bosganda."""
     user_id = update.effective_user.id
     conversations[user_id] = []
+    db_upsert_user(update)
+    db_clear_conversation(user_id)
 
     await update.message.reply_text(
         "Assalomu alaykum! 🙌\n\n"
@@ -452,8 +781,35 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Suhbat tarixini tozalash."""
-    conversations[update.effective_user.id] = []
+    uid = update.effective_user.id
+    conversations[uid] = []
+    db_clear_conversation(uid)
     await update.message.reply_text("Suhbat tarixi tozalandi ✅")
+
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ega uchun statistika (faqat OWNER_CHAT_ID uchun)."""
+    if update.effective_user.id != OWNER_CHAT_ID:
+        return
+    s = db_stats()
+    text = (
+        f"📊 *STATISTIKA*\n\n"
+        f"👥 Jami mijozlar: {s['total_users']}\n"
+        f"💰 To'laganlar: {s['paid_users']}\n"
+        f"📈 Konversiya: {s['conversion_pct']:.1f}%\n\n"
+        f"*BUGUN:*\n"
+        f"  🆕 Yangi mijoz: {s['today_users']}\n"
+        f"  ✅ To'lov: {s['today_paid']}\n"
+        f"  💵 Daromad: {s['revenue_today']:,} so'm\n\n"
+        f"*OXIRGI 7 KUN:*\n"
+        f"  🆕 Yangi mijoz: {s['week_users']}\n"
+        f"  ✅ To'lov: {s['week_paid']}\n"
+        f"  💵 Daromad: {s['revenue_week']:,} so'm\n\n"
+        f"*JAMI:*\n"
+        f"  💵 Daromad: {s['revenue_total']:,} so'm\n"
+        f"  🧾 Chekar (Vision): {s['total_receipts']}"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def handle_confirm_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -519,7 +875,9 @@ async def handle_confirm_button(update: Update, context: ContextTypes.DEFAULT_TY
             conversations[user_chat_id].append(
                 {"role": "assistant", "content": link_msg}
             )
-            # To'lov tasdiqlandi — barcha follow-uplarni bekor qilamiz
+            db_add_message(user_chat_id, "assistant", link_msg)
+            # To'lov TASDIQLANDI — bazaga belgilaymiz + follow-uplarni bekor qilamiz
+            db_mark_paid(user_chat_id)
             cancel_followups(context, user_chat_id)
 
             # Egaga xabar (tugmalarni olib tashlab)
@@ -579,11 +937,16 @@ async def handle_owner_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"replied_text_preview={replied_text[:80]!r}"
     )
 
-    # 1) Xotiradagi mapping'dan qidiramiz
+    # 1) Xotiradagi mapping'dan qidiramiz (eng tez)
     user_chat_id = notif_to_user.get(replied.message_id) if replied else None
     logger.info(f"handle_owner_reply: from_memory={user_chat_id}")
 
-    # 2) Bulmasa — matnda UID:xxx dan olamiz
+    # 2) SQLite bazadan qidiramiz (bot restart bolganda ham ishlaydi)
+    if not user_chat_id and replied:
+        user_chat_id = db_get_notification_user(replied.message_id)
+        logger.info(f"handle_owner_reply: from_db={user_chat_id}")
+
+    # 3) Bulmasa — matnda UID:xxx dan olamiz (oxirgi imkoniyat)
     if not user_chat_id:
         user_chat_id = extract_user_id(replied_text)
         logger.info(f"handle_owner_reply: from_text={user_chat_id}")
@@ -646,6 +1009,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     is_receipt, has_ai_darslik, verify_info = await verify_receipt(image_bytes)
+    db_upsert_user(update)
+    db_save_receipt(user_id, is_receipt, has_ai_darslik, verify_info)
 
     # ========== 1) CHEK EMAS ==========
     if not is_receipt:
@@ -753,8 +1118,13 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_text = update.message.text
 
-    conversations[user_id].append({"role": "user", "content": user_text})
-    conversations[user_id] = conversations[user_id][-20:]
+    # Foydalanuvchini bazaga saqlaymiz/yangilaymiz
+    db_upsert_user(update)
+    db_add_message(user_id, "user", user_text)
+
+    # Suhbat kontekstini DB'dan olamiz (bot restart bolganda ham eslaydi)
+    history = db_get_conversation(user_id, limit=20)
+    conversations[user_id] = history  # xotira cache
 
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id, action="typing"
@@ -776,6 +1146,7 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply = "Uzr, javobda muammo boldi. Qaytadan yozing 🙏"
 
         conversations[user_id].append({"role": "assistant", "content": reply})
+        db_add_message(user_id, "assistant", reply)  # doimiy saqlash
         await update.message.reply_text(reply)
 
         # Egaga xabar (ega ozini test qilsa yubormaymiz)
@@ -811,12 +1182,60 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # =========================================================================
 
+async def restore_pending_followups(app: Application):
+    """Bot ishga tushganda DB'dagi kutayotgan follow-uplarni JobQueue'ga qayta yuklash."""
+    if app.job_queue is None:
+        logger.warning("job_queue yoq — follow-up'lar tiklanmadi")
+        return
+
+    pending = db_pending_followups()
+    now = datetime.now(timezone.utc)
+    restored = 0
+
+    for row in pending:
+        try:
+            fire_at = datetime.fromisoformat(row["fire_at"])
+            # Timezone bo'lmasa qo'shamiz
+            if fire_at.tzinfo is None:
+                fire_at = fire_at.replace(tzinfo=timezone.utc)
+
+            delay = (fire_at - now).total_seconds()
+
+            if delay < 0:
+                # Vaqti allaqachon o'tgan — 10 soniyadan keyin yuboramiz
+                delay = 10
+
+            app.job_queue.run_once(
+                followup_reminder,
+                when=delay,
+                data={
+                    "user_id": row["user_chat_id"],
+                    "type": row["reminder_type"],
+                    "db_id": row["id"],
+                },
+                name=f"followup_{row['user_chat_id']}",
+            )
+            restored += 1
+        except Exception as e:
+            logger.warning(f"Follow-up tiklashda xatolik: {e}")
+
+    logger.info(f"Kutayotgan follow-up'lar tiklandi: {restored}")
+
+
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    db_init()  # SQLite jadvallarni yaratish
+
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(restore_pending_followups)
+        .build()
+    )
 
     # Buyruqlar
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CommandHandler("stats", cmd_stats))
 
     # Inline tugmalar (Tasdiqlash / Rad etish)
     app.add_handler(
