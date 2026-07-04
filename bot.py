@@ -52,6 +52,7 @@ Keyin BUNDAY yoz:
 "Juda yaxshi, [ism aka/opa]! 🙌
 
 To'lov qilish uchun rekvizitlar:
+rekvizitlar butun chat davomida 1 marta ishlatilsin, qachonki mijoz qayta rekizit so'raganda yubor, boshqa hech qachon yuborma!
 
 💳 **Payme yoki Click** ilovasini oching
 🔍 Qidiruvda: **Mirage game club** deb qidiring
