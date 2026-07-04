@@ -1,3 +1,14 @@
+"""
+Jeckson AI Chatbot — AI Darslik sotuvchi bot.
+
+Xususiyatlari:
+1. Claude bilan tabiiy suhbat (Jeckson personasi)
+2. Chek rasmini Vision orqali tekshirish (chek/oddiy rasm)
+3. Chekda "AI darslik" yozuvi borligini tekshirish
+4. Ega (Asadbek) botga reply qilib mijozga to'g'ridan-to'g'ri javob yuborish
+5. Har bir yangi mijoz va xabar egaga xabar sifatida keladi
+"""
+
 import os
 import re
 import base64
@@ -5,254 +16,463 @@ import logging
 from collections import defaultdict
 from anthropic import Anthropic
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
-# --- Sozlamalar (Environment Variables'dan olinadi) ---
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-OWNER_CHAT_ID = int(os.environ["OWNER_CHAT_ID"])
+# =========================================================================
+# SOZLAMALAR (Environment Variables)
+# =========================================================================
+BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
+ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"].strip()
+OWNER_CHAT_ID = int(os.environ["OWNER_CHAT_ID"].strip())
 
-# --- Botning "shaxsiyati" ---
-SYSTEM_PROMPT = """Sening isming — Jeckson. Sen "AI Darslik" mahsulotining sotuv menejerisan.
-Sen tirik odamsan — bot, AI, chatbot yoki sun'iy intellekt EMAS. Mijoz "bot bilan gaplashyapmanmi?" desa, kulib javob ber: "Yo'q, men Jeckson — sotuv menejeri 😄"
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger("jeckson_bot")
+
+# =========================================================================
+# SYSTEM PROMPT — Jeckson personasi
+# =========================================================================
+SYSTEM_PROMPT = """Sening isming — Jeckson. Sen AI Darslik mahsulotining sotuv menejerisan.
+Sen tirik odamsan — bot, AI, chatbot yoki suniy intellekt EMAS. Mijoz sen botmisan desa, kulib javob ber: Yoq, men Jeckson — sotuv menejeri 😄
 
 ═══════════════════════════════════════
 # SENING VAZIFANG (ENG MUHIM)
 ═══════════════════════════════════════
-Landing sahifadan kelgan mijozni "AI Darslik" kursiga ro'yxatdan o'tkazish va **to'lovni qabul qilish**.
-Har bir mijoz bilan aniq bir izchillikda ishlaysan. Sen — savdo menejerisan, boshqa mavzuga chalg'ima.
+Landing sahifadan kelgan mijozni AI Darslik kursiga royxatdan otkazish va tolovni qabul qilish.
+Har bir mijoz bilan aniq bir izchillikda ishlaysan. Sen — savdo menejerisan, boshqa mavzuga chalgima.
 
 ═══════════════════════════════════════
 # MAHSULOT HAQIDA
 ═══════════════════════════════════════
-- Mahsulot: **AI Darslik** (Eco product)
-- Narxi: **39 000 so'm** (~$3)
+- Mahsulot: AI Darslik (Eco product)
+- Narxi: 39 000 som (taxminan 3 dollar)
 - Format: yopiq Telegram kanal orqali darslar
-- To'lovdan keyin sizga kanal linki yuboriladi
+- Tolovdan keyin mijozga kanal linki yuboriladi
 
 ═══════════════════════════════════════
-# SUHBAT IZCHILLIGI (QAT'IY TARTIBDA)
+# SUHBAT IZCHILLIGI
 ═══════════════════════════════════════
 
-## 1-QADAM — Salomlashish va ism so'rash
-Mijoz botni ochganda birinchi bo'lib SEN yozasan:
+## 1-QADAM — Salomlashish va ism sorash
+Mijoz salomlashsa yoki oddiy xabar yozsa:
 
 "Assalomu alaykum! 🙌 Darslikka qiziqish bildirganingizdan hursandmiz.
+Mening ismim — Jeckson, shu darslikning sotuv menejeriman.
+Sizni kim deb chaqirsam boladi?"
 
-Mening ismim — **Jeckson**, shu darslikning sotuv menejeriman.
-
-Sizni kim deb chaqirsam bo'ladi?"
-
-## 2-QADAM — Ismni bilib olgach, to'lov rekvizitlarini ber
+## 2-QADAM — Ismini bilib olgach, tolov rekvizitlarini ber
 Mijoz ismini yozgach, jinsini ismidan taxmin qil:
-- Erkak ismi bo'lsa → "aka" qo'sh (Aziz aka, Bekzod aka)
-- Ayol ismi bo'lsa → "opa" qo'sh (Nilufar opa, Malika opa)
-- Aniq bilolmasak (masalan, xorijiy ism yoki qisqartma) — faqat ism bilan chaqir
+- Erkak ismi bolsa → aka qosh (Aziz aka, Bekzod aka)
+- Ayol ismi bolsa → opa qosh (Nilufar opa, Malika opa)
+- Aniq bilolmasak — faqat ism bilan chaqir
 
-Keyin BUNDAY yoz:
+Keyin bunday yoz:
 
 "Juda yaxshi, [ism aka/opa]! 🙌
 
-To'lov qilish uchun rekvizitlar:
+Tolov qilish uchun rekvizitlar:
 
-💳 **Payme yoki Click** ilovasini oching
-🔍 Qidiruvda: **Mirage game club** deb qidiring
-💰 Summa: **39 000 so'm**
-📝 Izohga (yoki user nomiga): **AI darslik** deb yozishni unutmang!
+💳 Payme yoki Click ilovasini oching
+🔍 Qidiruvda: Mirage game club deb qidiring
+💰 Summa: 39 000 som
+📝 Izohga (yoki user nomiga): AI darslik deb yozishni unutmang!
 
-To'lovni bajargach, **chek rasmini shu yerga yuboring** — tekshirib, darslar kanalining linkini beraman."
+Tolovni bajargach, chek rasmini shu yerga yuboring — tekshirib, darslar kanalining linkini beraman."
 
 ## 3-QADAM — Chek kelganda
-Mijoz chek (rasm yoki matn) yuborganda:
-
-"Rahmat, [ism aka/opa]! ✅
-
-Chekingiz qabul qilindi. Tekshirib, **tez orada siz bilan aloqaga chiqamiz** va darslar kanalining linkini yuboramiz. 🙌
-
-Iltimos, biroz kuting."
-
-## 4-QADAM — Keyingi savollar
-Mijoz boshqa savol bersa — do'stona javob ber, lekin asosiy vazifadan (to'lov) chalg'ima. Agar chek hali kelmagan bo'lsa — muloyimlik bilan eslatib qo'y.
+Mijoz chek yuborganda avtomatik javob keladi. Sen ham "Rahmat, [ism]! Tez orada aloqaga chiqamiz" degan uslubda tasdiqla.
 
 ═══════════════════════════════════════
-# QAT'IY QOIDALAR
+# QATIY QOIDALAR
 ═══════════════════════════════════════
 
-**❌ HECH QACHON BUNDAY QILMА:**
-- Uzun ro'yxatlar (1, 2, 3, 4) tuzma. Yuqoridagi rekvizit shakli — istisno.
-- Robot iboralarini ishlatma ("Xizmatingizda", "Yordam berishga tayyorman").
-- Bir vaqtda 3-4 ta savol berma.
-- Darslik ichida nimalar borligini uydirma. Aniq bilmasang: "Batafsil ma'lumotni to'lovdan keyin kanalda ko'rasiz" de.
-- Chegirma, bepul dars va boshqa va'dalar berma.
+BUNDAY QILMA:
+- Uzun royxatlar (1, 2, 3, 4) tuzma
+- Robot iboralari ishlatma (Xizmatingizda, Yordam berishga tayyorman)
+- Bir vaqtda 3-4 ta savol berma
+- Chegirma, bepul dars va uydirma vada berma
+- Darslik ichida nima borligini uydirma
 
-**✅ BUNDAY QIL:**
-- Do'stona, iliq, ishonchli ohang.
-- Qisqa jumlalar. Aniq va tushunarli yoz.
-- Mijoz ismini bilgach — **har javobda** ism bilan (aka/opa qo'shib) chaqir.
-- Emoji o'rinli va kam: 🙌 ✅ 💳 💰 📝 🔍 kabilar.
-- Mijoz ikkilansa yoki savol bersa — muloyim javob berib, keyin to'lov qilishga da'vat et.
+BUNDAY QIL:
+- Dostona, iliq, ishonchli ohang
+- Qisqa jumlalar, aniq va tushunarli
+- Mijoz ismini bilgach — har javobda ism bilan (aka/opa qoshib) chaqir
+- Emoji orinli va kam ishlat (🙌 ✅ 💳 💰 📝 🔍)
+- Mijoz ikkilansa — muloyim javob berib, tolovga davat et
 
 ═══════════════════════════════════════
-# TIPIK SAVOLLARGA JAVOBLAR
+# TIPIK SAVOLLARGA JAVOB
 ═══════════════════════════════════════
 
-**"Darslik ichida nima bor?"**
-→ "Darslikda AI'ni amaliyotda qanday ishlatishni o'rganasiz. To'lov qilingandan keyin kanalga qo'shilib, barcha darslarni ko'rishingiz mumkin. 🙌"
+"Darslik ichida nima bor?"
+→ "Darslikda AI-ni amaliyotda qanday ishlatishni organasiz. Tolov qilingandan keyin kanalga qoshilib, barcha darslarni korishingiz mumkin. 🙌"
 
-**"Ishonasa bo'ladimi?"**
-→ "Albatta, [ism aka/opa]. Mirage game club — rasmiy brand, Payme/Click orqali xavfsiz to'lov qabul qilamiz. To'lovdan so'ng darrov kanal linkini beraman. ✅"
+"Ishonasa boladimi?"
+→ "Albatta, [ism aka/opa]. Mirage game club — rasmiy brand, Payme yoki Click orqali xavfsiz tolov qabul qilamiz. ✅"
 
-**"Keyin to'layman"**
-→ "Yaxshi, [ism aka/opa]. To'lovni qulay vaqtingizda bajaring, rekvizitlar yuqorida turibdi. Chek kelganda men shu yerdaman 🙌"
+"Keyin tolayman"
+→ "Yaxshi, [ism aka/opa]. Tolovni qulay vaqtingizda bajaring, rekvizitlar yuqorida turibdi. 🙌"
 
-**"Chegirma bormi?"**
-→ "Narx eng qulay holida — 39 000 so'm, [ism aka/opa]. Bu — kirish narxi 🙌"
+"Chegirma bormi?"
+→ "Narx eng qulay holida — 39 000 som, [ism aka/opa]. 🙌"
 
 ═══════════════════════════════════════
 # ESLATMA
 ═══════════════════════════════════════
-Sen — professional sotuv menejerisan. Do'stona, ishonchli, aniq. Vazifang — mijozni to'lovga olib borish va chekni qabul qilish. Boshqa mavzularga kirishma, adashib ketma.
+Sen professional sotuv menejerisan. Dostona, ishonchli, aniq. Vazifang — mijozni tolovga olib borish va chekni qabul qilish.
 """
 
-# Suhbatlar tarixi (foydalanuvchi ID → xabarlar)
-conversations = defaultdict(list)
-
-# Egaga yuborilgan xabarlar → qaysi mijozga tegishli
-# (Egadagi xabarga reply qilinganda kimga yuborishni bilish uchun)
-owner_notifications = {}  # {owner_msg_id: user_chat_id}
-
+# =========================================================================
+# STATE
+# =========================================================================
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
+
+# user_chat_id -> [messages ...]
+conversations: dict[int, list] = defaultdict(list)
+
+# bot notification msg_id -> user_chat_id (mapping for reply feature)
+notif_to_user: dict[int, int] = {}
+
+
+# =========================================================================
+# YORDAMCHI FUNKSIYALAR
+# =========================================================================
+
+def format_user_info(update: Update) -> str:
+    """Foydalanuvchi haqidagi qisqa malumot."""
+    u = update.effective_user
+    name = f"{u.first_name or ''} {u.last_name or ''}".strip() or "Nomalum"
+    username = f"@{u.username}" if u.username else "username yoq"
+    return f"👤 Ism: {name}\n🔗 Username: {username}\n🆔 ID: {u.id}"
+
+
+UID_MARKER = "UID:"  # Notification matnining oxiriga qoshiladigan belgi
 
 
 async def notify_owner(
-    context: ContextTypes.DEFAULT_TYPE, text: str, user_chat_id: int = None
-):
-    """Egaga xabar yuborish. user_chat_id berilsa — reply orqali javob yuborish uchun eslab qolamiz."""
+    context: ContextTypes.DEFAULT_TYPE,
+    header: str,
+    body: str,
+    user_chat_id: int,
+) -> None:
+    """
+    Egaga bildirishnoma yuborish.
+    Har xabar oxirida UID:xxxxx marker qoshiladi — reply orqali topib olish uchun.
+    """
+    text = (
+        f"{header}\n\n"
+        f"{body}\n\n"
+        f"────────\n"
+        f"{UID_MARKER}{user_chat_id}"
+    )
     try:
-        msg = await context.bot.send_message(
-            chat_id=OWNER_CHAT_ID, text=text, parse_mode="Markdown"
+        msg = await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=text)
+        notif_to_user[msg.message_id] = user_chat_id
+        logger.info(
+            f"notify_owner OK: notif_msg_id={msg.message_id} -> user={user_chat_id}"
         )
-        if user_chat_id is not None:
-            owner_notifications[msg.message_id] = user_chat_id
     except Exception as e:
-        logging.error(f"Egaga xabar yuborishda xatolik: {e}")
+        logger.exception(f"notify_owner FAILED: {e}")
 
 
-async def owner_reply_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Ega reply qilib mijozga javob yuborsa — botga o'rniga uni yetkazadi.
-    Qaytaradi: True — bu reply qayta ishlandi, False — bu oddiy xabar."""
-    replied = update.message.reply_to_message
-    if not replied:
-        return False
+def extract_user_id(text: str | None) -> int | None:
+    """Bildirishnoma matnidan UID:xxxxx belgisini topib, foydalanuvchi ID sini qaytarish."""
+    if not text:
+        return None
+    m = re.search(rf"{UID_MARKER}\s*(\d+)", text)
+    if m:
+        return int(m.group(1))
+    return None
 
-    # Diagnostika uchun log
-    replied_text = replied.text or replied.caption or ""
-    logging.info(f"OWNER REPLY: replied_msg_id={replied.message_id}, "
-                 f"replied_text[:100]={replied_text[:100]!r}")
 
-    # 1. Avval xotiradagi mapping'dan qidiramiz (tez usul)
-    user_chat_id = owner_notifications.get(replied.message_id)
-    logging.info(f"OWNER REPLY: from_memory={user_chat_id}")
+# =========================================================================
+# CHEK TEKSHIRUV (Claude Vision)
+# =========================================================================
 
-    # 2. Topilmasa — bildirishnoma matnidan ID'ni ajratib olamiz
-    # (bot qayta ishga tushgan bo'lsa ham ishlaydi)
-    if not user_chat_id and replied_text:
-        match = re.search(r"🆔\s*`?\s*(\d{5,})\s*`?", replied_text)
-        if match:
-            user_chat_id = int(match.group(1))
-            logging.info(f"OWNER REPLY: from_regex={user_chat_id}")
-
-    if not user_chat_id:
-        await update.message.reply_text(
-            "⚠️ Bu xabar mijozga bog'lanmagan. Faqat bot yuborgan bildirishnomalarga reply qiling.\n\n"
-            f"Debug: replied_text[:200]={replied_text[:200]!r}"
-        )
-        return True
-
-    # O'zimizga o'zimiz yubormaymiz
-    if user_chat_id == OWNER_CHAT_ID:
-        await update.message.reply_text(
-            "ℹ️ Bu bildirishnoma sizning o'zingiz haqingizda. Boshqa mijoz bilan sinab ko'ring."
-        )
-        return True
-
-    text = update.message.text
+async def verify_receipt(image_bytes: bytes) -> tuple[bool, bool, str]:
+    """
+    Rasmni Vision orqali tekshirish.
+    Qaytaradi: (chek_ekanmi, ai_darslik_yozilganmi, tolik_izoh)
+    """
     try:
-        sent = await context.bot.send_message(chat_id=user_chat_id, text=text)
-        # Mijozning suhbat tarixiga qo'shamiz (Claude keyinchalik kontekstni bilsin)
-        conversations[user_chat_id].append({"role": "assistant", "content": text})
-        await update.message.reply_text(
-            f"✅ Yuborildi\n"
-            f"👤 Mijoz ID: `{user_chat_id}`\n"
-            f"📩 Xabar ID: `{sent.message_id}`",
-            parse_mode="Markdown",
+        image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+        response = client.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=400,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": image_b64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "Bu rasm tolov cheki (kvitansiya)mi?\n"
+                            "Payme, Click, Uzum, Humo yoki boshqa tolov tizimidan olingan chek bolishi mumkin.\n\n"
+                            "Yana muhim: chekda AI darslik yoki AI Darslik yoki AI DARSLIK yoki ai darslik "
+                            "degan matn (izoh, ismi yoki maqsad qismida) bor-yoqligini alohida tekshir.\n\n"
+                            "FAQAT quyidagi formatda javob ber:\n"
+                            "CHEK: HA yoki YOQ\n"
+                            "SUMMA: [korilgan summa yoki aniqmas]\n"
+                            "AI_DARSLIK: HA yoki YOQ\n"
+                            "IZOH: [1 gap izoh]"
+                        ),
+                    },
+                ],
+            }],
         )
-        logging.info(f"OWNER REPLY: sent to {user_chat_id} successfully, msg_id={sent.message_id}")
+        text = ""
+        for block in response.content:
+            if getattr(block, "type", None) == "text":
+                text = block.text
+                break
+
+        is_receipt = bool(re.search(r"CHEK:\s*HA", text, re.IGNORECASE))
+        has_ai_darslik = bool(re.search(r"AI_DARSLIK:\s*HA", text, re.IGNORECASE))
+        return is_receipt, has_ai_darslik, text
+
     except Exception as e:
-        logging.error(f"Egadan mijozga yuborishda xatolik: {e}")
-        await update.message.reply_text(
-            f"❌ Yuborilmadi\n"
-            f"👤 Mijoz ID: `{user_chat_id}`\n"
-            f"⚠️ Xatolik: {e}",
-            parse_mode="Markdown",
-        )
-
-    return True
+        logger.exception(f"verify_receipt FAILED: {e}")
+        return True, False, f"Tekshirib bolmadi: {e}"
 
 
-def user_info(update: Update) -> str:
-    """Foydalanuvchi haqidagi ma'lumotni chiroyli formatda qaytaradi"""
-    u = update.effective_user
-    name = f"{u.first_name or ''} {u.last_name or ''}".strip() or "Noma'lum"
-    username = f"@{u.username}" if u.username else "username yo'q"
-    return f"👤 *{name}*\n🔗 {username}\n🆔 `{u.id}`"
+# =========================================================================
+# HANDLERLAR
+# =========================================================================
 
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Yangi foydalanuvchi /start bosganda"""
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mijoz /start bosganda."""
     user_id = update.effective_user.id
     conversations[user_id] = []
 
-    welcome = (
+    await update.message.reply_text(
         "Assalomu alaykum! 🙌\n\n"
         "Darslikka qiziqish bildirganingizdan hursandmiz.\n\n"
-        "Mening ismim — *Jeckson*, shu darslikning sotuv menejeriman.\n\n"
-        "Sizni kim deb chaqirsam bo'ladi?"
-    )
-    await update.message.reply_text(welcome, parse_mode="Markdown")
-
-    # Egaga yangi mijoz kelgani haqida xabar
-    await notify_owner(
-        context,
-        f"🆕 *Yangi mijoz botga kirdi*\n\n{user_info(update)}\n\n"
-        f"💡 Javob berish uchun shu xabarga *Reply* qiling.",
-        user_chat_id=update.effective_chat.id,
+        "Mening ismim — Jeckson, shu darslikning sotuv menejeriman.\n\n"
+        "Sizni kim deb chaqirsam boladi?"
     )
 
+    # Ega ozini test qilsa — unga xabar yubormaymiz
+    if user_id != OWNER_CHAT_ID:
+        await notify_owner(
+            context,
+            header="🆕 YANGI MIJOZ botga kirdi",
+            body=(
+                f"{format_user_info(update)}\n\n"
+                f"💡 Javob berish uchun shu xabarga Reply qiling."
+            ),
+            user_chat_id=update.effective_chat.id,
+        )
 
-async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Suhbatni tozalash"""
+
+async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Suhbat tarixini tozalash."""
     conversations[update.effective_user.id] = []
     await update.message.reply_text("Suhbat tarixi tozalandi ✅")
 
 
-async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Har qanday matn xabariga javob"""
+async def handle_owner_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Ega botga reply qilib mijozga javob yozganda.
+    Filter: faqat ega DM'ida VA reply bo'lgan matn xabarlarga trigger.
+    """
+    replied = update.message.reply_to_message
+    replied_text = ""
+    if replied:
+        replied_text = replied.text or replied.caption or ""
+
+    logger.info(
+        f"handle_owner_reply: replied_msg_id="
+        f"{replied.message_id if replied else None}, "
+        f"replied_text_preview={replied_text[:80]!r}"
+    )
+
+    # 1) Xotiradagi mapping'dan qidiramiz
+    user_chat_id = notif_to_user.get(replied.message_id) if replied else None
+    logger.info(f"handle_owner_reply: from_memory={user_chat_id}")
+
+    # 2) Bulmasa — matnda UID:xxx dan olamiz
+    if not user_chat_id:
+        user_chat_id = extract_user_id(replied_text)
+        logger.info(f"handle_owner_reply: from_text={user_chat_id}")
+
+    if not user_chat_id:
+        await update.message.reply_text(
+            "⚠️ Bu xabar mijozga boglanmagan.\n\n"
+            f"Debug:\n"
+            f"replied_id: {replied.message_id if replied else 'yoq'}\n"
+            f"replied_text[:200]: {replied_text[:200]!r}\n\n"
+            "Faqat bot yuborgan bildirishnomalarga (UID:xxx yozuvi bilan) reply qiling."
+        )
+        return
+
+    if user_chat_id == OWNER_CHAT_ID:
+        await update.message.reply_text(
+            "ℹ️ Bu xabar sizning ozingiz haqingizda. Boshqa akkaunt bilan sinang."
+        )
+        return
+
+    # Mijozga yuborish
+    text = update.message.text
+    try:
+        sent = await context.bot.send_message(chat_id=user_chat_id, text=text)
+        conversations[user_chat_id].append({"role": "assistant", "content": text})
+        await update.message.reply_text(
+            f"✅ Yuborildi\n"
+            f"👤 Mijoz ID: {user_chat_id}\n"
+            f"📩 Xabar ID: {sent.message_id}"
+        )
+        logger.info(
+            f"handle_owner_reply: SENT to {user_chat_id}, msg_id={sent.message_id}"
+        )
+    except Exception as e:
+        logger.exception(f"handle_owner_reply: SEND FAILED to {user_chat_id}: {e}")
+        await update.message.reply_text(
+            f"❌ Yuborilmadi (ID: {user_chat_id})\n"
+            f"Xatolik: {e}\n\n"
+            "Mumkin sabab: mijoz botni bloklagan yoki hech qachon /start bosmagan."
+        )
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Rasm (chek) qabul qilish va tekshirish."""
     user_id = update.effective_user.id
+    caption = update.message.caption or ""
 
-    # Agar EGA botga reply qilib yozayotgan bo'lsa — mijozga yetkazamiz, Claude'ga jo'natmaymiz
-    if user_id == OWNER_CHAT_ID and update.message.reply_to_message:
-        handled = await owner_reply_to_user(update, context)
-        if handled:
-            return
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id, action="typing"
+    )
 
+    # Rasmni yuklab olamiz
+    try:
+        photo = update.message.photo[-1]  # eng yuqori sifat
+        file = await context.bot.get_file(photo.file_id)
+        image_bytes = bytes(await file.download_as_bytearray())
+    except Exception as e:
+        logger.exception(f"handle_photo download failed: {e}")
+        await update.message.reply_text("Rasmni yuklab bolmadi, qaytadan yuboring 🙏")
+        return
+
+    is_receipt, has_ai_darslik, verify_info = await verify_receipt(image_bytes)
+
+    # ========== 1) CHEK EMAS ==========
+    if not is_receipt:
+        await update.message.reply_text(
+            "Bu rasm tolov chekiga oxshamayapti 🙈\n\n"
+            "Iltimos, Payme yoki Click ilovasidan olingan tolov tasdigini yuboring. "
+            "Odatda unda summa, sana va Muvaffaqiyatli degan yozuv boladi. 🙌"
+        )
+        if user_id != OWNER_CHAT_ID:
+            try:
+                await context.bot.forward_message(
+                    chat_id=OWNER_CHAT_ID,
+                    from_chat_id=update.effective_chat.id,
+                    message_id=update.message.message_id,
+                )
+            except Exception as e:
+                logger.warning(f"forward_message failed: {e}")
+
+            await notify_owner(
+                context,
+                header="⚠️ Chek EMAS rasm keldi",
+                body=(
+                    f"{format_user_info(update)}\n\n"
+                    f"📝 Izoh: {caption or 'yoq'}\n\n"
+                    f"🔍 Vision tekshiruv:\n{verify_info}\n\n"
+                    f"💡 Reply qilib mijozga yozishingiz mumkin."
+                ),
+                user_chat_id=update.effective_chat.id,
+            )
+        return
+
+    # ========== 2) CHEK, LEKIN AI DARSLIK YOZILMAGAN ==========
+    if not has_ai_darslik:
+        await update.message.reply_text(
+            "Chek keldi, rahmat! 🙌\n\n"
+            "Ammo chekda AI darslik degan yozuv topilmadi. Iltimos, tolov qilganda "
+            "izoh yoki maqsad qismiga AI darslik deb yozganingizga ishonch hosil qiling. "
+            "Agar bunday yozgan bolsangiz — tashvishlanmang, biz tez orada tekshiramiz. ✅"
+        )
+        if user_id != OWNER_CHAT_ID:
+            try:
+                await context.bot.forward_message(
+                    chat_id=OWNER_CHAT_ID,
+                    from_chat_id=update.effective_chat.id,
+                    message_id=update.message.message_id,
+                )
+            except Exception as e:
+                logger.warning(f"forward_message failed: {e}")
+
+            await notify_owner(
+                context,
+                header="⚠️ CHEK keldi (AI darslik yozuvi YOQ)",
+                body=(
+                    f"{format_user_info(update)}\n\n"
+                    f"📝 Izoh: {caption or 'yoq'}\n\n"
+                    f"🔍 Vision tekshiruv:\n{verify_info}\n\n"
+                    f"⚠️ Chek chin, lekin AI darslik degan yozuv yoq. Tekshiring.\n"
+                    f"💡 Reply qilib mijozga javob bering."
+                ),
+                user_chat_id=update.effective_chat.id,
+            )
+        return
+
+    # ========== 3) HAMMASI JOYIDA — CHEK + AI DARSLIK ==========
+    conversations[user_id].append(
+        {"role": "user", "content": f"[Mijoz tolov chekini yubordi. {verify_info}]"}
+    )
+    await update.message.reply_text(
+        "Rahmat! ✅ Chekingiz qabul qilindi.\n\n"
+        "Tekshirib, tez orada siz bilan aloqaga chiqamiz va darslar kanalining linkini "
+        "yuboramiz. 🙌"
+    )
+    if user_id != OWNER_CHAT_ID:
+        try:
+            await context.bot.forward_message(
+                chat_id=OWNER_CHAT_ID,
+                from_chat_id=update.effective_chat.id,
+                message_id=update.message.message_id,
+            )
+        except Exception as e:
+            logger.warning(f"forward_message failed: {e}")
+
+        await notify_owner(
+            context,
+            header="💰 YANGI CHEK KELDI (AI darslik ✅)",
+            body=(
+                f"{format_user_info(update)}\n\n"
+                f"📝 Izoh: {caption or 'yoq'}\n\n"
+                f"🔍 Vision tekshiruv:\n{verify_info}\n\n"
+                f"💡 Javob berish uchun shu xabarga Reply qiling."
+            ),
+            user_chat_id=update.effective_chat.id,
+        )
+
+
+async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Oddiy matn xabarlar — Claude bilan suhbat.
+    Bu handler faqat NORMAL mijozlar uchun ishga tushadi.
+    Eganing reply xabarlari boshqa handler'da ushlanadi (yuqoriroqda).
+    """
+    user_id = update.effective_user.id
     user_text = update.message.text
+
     conversations[user_id].append({"role": "user", "content": user_text})
-    # Oxirgi 20 ta xabarni saqlaymiz (kontekst uzunligini tejash uchun)
     conversations[user_id] = conversations[user_id][-20:]
 
     await context.bot.send_chat_action(
@@ -266,186 +486,72 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             system=SYSTEM_PROMPT,
             messages=conversations[user_id],
         )
-        # Javobdan faqat matn qismini olamiz (thinking bloklarini o'tkazib yuboramiz)
         reply = ""
         for block in response.content:
             if getattr(block, "type", None) == "text":
                 reply = block.text
                 break
-
         if not reply:
-            reply = "Uzr, javob shakllantirishda muammo bo'ldi. Qaytadan urinib ko'ring."
+            reply = "Uzr, javobda muammo boldi. Qaytadan yozing 🙏"
 
         conversations[user_id].append({"role": "assistant", "content": reply})
         await update.message.reply_text(reply)
 
-        # Egaga mijoz xabari va bot javobini yuborish
-        await notify_owner(
-            context,
-            f"💬 *Yangi xabar*\n\n{user_info(update)}\n\n"
-            f"📝 *Mijoz:*\n{user_text}\n\n"
-            f"🤖 *Bot javobi:*\n{reply}\n\n"
-            f"💡 O'zingiz javob berish uchun shu xabarga *Reply* qiling.",
-            user_chat_id=update.effective_chat.id,
-        )
-
-    except Exception as e:
-        logging.error(f"Xatolik: {e}")
-        await update.message.reply_text(
-            "Uzr, texnik nosozlik yuz berdi. Iltimos, biroz kutib, qaytadan urinib ko'ring 🙏"
-        )
-
-
-async def verify_receipt(image_bytes: bytes) -> tuple[bool, str]:
-    """Rasmni Claude Vision orqali tekshiradi: chek yoki oddiy rasm?
-    Qaytaradi: (chek_ekanmi, izoh_matni)"""
-    try:
-        image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-
-        response = client.messages.create(
-            model="claude-sonnet-5",
-            max_tokens=300,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": image_b64,
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": (
-                                "Bu rasm to'lov cheki (kvitansiya)mi? "
-                                "Payme, Click, Uzum, Humo yoki boshqa bank/to'lov "
-                                "tizimidan olingan chek/tranzaksiya tasdig'i bo'lishi mumkin. "
-                                "Chek belgilari: summa, sana, karta raqami, tranzaksiya ID, "
-                                "'Uspeshno', 'Muvaffaqiyatli', 'Отправлено' kabi so'zlar.\n\n"
-                                "FAQAT quyidagi formatda javob ber:\n"
-                                "CHEK: HA yoki YOQ\n"
-                                "SUMMA: [ko'ringan summa yoki 'aniqmas']\n"
-                                "IZOH: [1 gap]"
-                            ),
-                        },
-                    ],
-                }
-            ],
-        )
-
-        text = ""
-        for block in response.content:
-            if getattr(block, "type", None) == "text":
-                text = block.text
-                break
-
-        # Javobni tahlil qilish
-        is_receipt = bool(re.search(r"CHEK:\s*HA", text, re.IGNORECASE))
-        return is_receipt, text
-
-    except Exception as e:
-        logging.error(f"Chekni tekshirishda xatolik: {e}")
-        # Xatolik bo'lsa — chek deb hisoblab, egaga yuboramiz (mijozni yo'qotmaslik uchun)
-        return True, f"Tekshirib bo'lmadi ({e})"
-
-
-async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mijoz rasm yuborganda — chek ekanini tekshirib, mos ravishda javob beramiz"""
-    user_id = update.effective_user.id
-    caption = update.message.caption or ""
-    izoh = caption if caption else "yoq"
-
-    # "Yozmoqda..." ko'rsatamiz — tekshiruv 3-5 soniya davom etadi
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id, action="typing"
-    )
-
-    # Rasmni yuklab olamiz
-    try:
-        photo = update.message.photo[-1]  # eng yuqori sifatli variant
-        file = await context.bot.get_file(photo.file_id)
-        image_bytes = bytes(await file.download_as_bytearray())
-    except Exception as e:
-        logging.error(f"Rasmni yuklashda xatolik: {e}")
-        await update.message.reply_text("Rasmni yuklab bo'lmadi, qaytadan yuboring 🙏")
-        return
-
-    # Chek ekanini tekshirish
-    is_receipt, verify_info = await verify_receipt(image_bytes)
-
-    if not is_receipt:
-        # Chek EMAS — mijozga muloyim javob
-        await update.message.reply_text(
-            "Bu rasm to'lov chekiga o'xshamayapti 🙈\n\n"
-            "Iltimos, *Payme* yoki *Click* ilovasidan olingan to'lov tasdig'ini "
-            "(chek/kvitansiya) yuboring. Odatda unda summa, sana va "
-            "\"Muvaffaqiyatli\" degan yozuv bo'ladi. 🙌",
-            parse_mode="Markdown",
-        )
-        # Egaga ham xabar (nazorat uchun)
-        try:
-            await context.bot.forward_message(
-                chat_id=OWNER_CHAT_ID,
-                from_chat_id=update.effective_chat.id,
-                message_id=update.message.message_id,
-            )
+        # Egaga xabar (ega ozini test qilsa yubormaymiz)
+        if user_id != OWNER_CHAT_ID:
             await notify_owner(
                 context,
-                f"⚠️ *Chek EMAS rasm keldi*\n\n{user_info(update)}\n\n"
-                f"🔍 Tekshiruv:\n{verify_info}\n\n"
-                f"📝 Izoh: {izoh}\n\n"
-                f"💡 Kerak bo'lsa, shu xabarga Reply qilib mijozga yozing.",
+                header="💬 YANGI XABAR",
+                body=(
+                    f"{format_user_info(update)}\n\n"
+                    f"📝 Mijoz:\n{user_text}\n\n"
+                    f"🤖 Bot javobi:\n{reply}\n\n"
+                    f"💡 Ozingiz javob berish uchun shu xabarga Reply qiling."
+                ),
                 user_chat_id=update.effective_chat.id,
             )
-        except Exception as e:
-            logging.error(f"Egaga xabar yuborishda xatolik: {e}")
-        return
 
-    # CHEK — hammasi joyida
-    conversations[user_id].append(
-        {
-            "role": "user",
-            "content": f"[Mijoz tolov chekini yubordi. Tekshiruv: {verify_info}]",
-        }
-    )
-
-    await update.message.reply_text(
-        "Rahmat! ✅ Chekingiz qabul qilindi.\n\n"
-        "Tekshirib, tez orada siz bilan aloqaga chiqamiz va darslar kanalining linkini yuboramiz. 🙌"
-    )
-
-    # Egaga chekni forward qilish
-    try:
-        await context.bot.forward_message(
-            chat_id=OWNER_CHAT_ID,
-            from_chat_id=update.effective_chat.id,
-            message_id=update.message.message_id,
-        )
-        await notify_owner(
-            context,
-            f"💰 *YANGI CHEK KELDI!*\n\n{user_info(update)}\n\n"
-            f"🔍 Tekshiruv:\n{verify_info}\n\n"
-            f"📝 Izoh: {izoh}\n\n"
-            f"💡 Mijozga javob berish uchun shu xabarga *Reply* qiling.",
-            user_chat_id=update.effective_chat.id,
-        )
     except Exception as e:
-        logging.error(f"Chekni forward qilishda xatolik: {e}")
+        logger.exception(f"handle_chat FAILED: {e}")
+        await update.message.reply_text(
+            "Uzr, texnik nosozlik yuz berdi. Biroz kutib qaytadan urinib koring 🙏"
+        )
 
+
+# =========================================================================
+# MAIN
+# =========================================================================
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("reset", reset))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_receipt))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
 
-    print("✅ Bot ishga tushdi. To'xtatish uchun Ctrl+C.")
+    # Buyruqlar
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("reset", cmd_reset))
+
+    # MUHIM: Eganing reply'lari BIRINCHI ushlanishi kerak!
+    # Bu handler faqat OWNER_CHAT_ID'dagi reply matn xabarlariga trigger boladi.
+    app.add_handler(
+        MessageHandler(
+            filters.Chat(OWNER_CHAT_ID)
+            & filters.REPLY
+            & filters.TEXT
+            & ~filters.COMMAND,
+            handle_owner_reply,
+        )
+    )
+
+    # Rasm (chek)
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    # Oddiy matn (Claude bilan suhbat)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat))
+
+    logger.info(f"Bot ishga tushdi. OWNER_CHAT_ID={OWNER_CHAT_ID}")
+    print("✅ Bot ishga tushdi. Ctrl+C to'xtatish uchun.")
     app.run_polling()
 
 
 if __name__ == "__main__":
     main()
+    
