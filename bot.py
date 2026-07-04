@@ -115,6 +115,10 @@ Sen — professional sotuv menejerisan. Do'stona, ishonchli, aniq. Vazifang — 
 # Suhbatlar tarixi (foydalanuvchi ID → xabarlar)
 conversations = defaultdict(list)
 
+# Egaga yuborilgan xabarlar → qaysi mijozga tegishli
+# (Egadagi xabarga reply qilinganda kimga yuborishni bilish uchun)
+owner_notifications = {}  # {owner_msg_id: user_chat_id}
+
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -122,14 +126,45 @@ logging.basicConfig(
 )
 
 
-async def notify_owner(context: ContextTypes.DEFAULT_TYPE, text: str):
-    """Egaga (Asadbek akaga) xabar yuborish. Xatolik bo'lsa ham botni to'xtatmaydi."""
+async def notify_owner(
+    context: ContextTypes.DEFAULT_TYPE, text: str, user_chat_id: int = None
+):
+    """Egaga xabar yuborish. user_chat_id berilsa — reply orqali javob yuborish uchun eslab qolamiz."""
     try:
-        await context.bot.send_message(
+        msg = await context.bot.send_message(
             chat_id=OWNER_CHAT_ID, text=text, parse_mode="Markdown"
         )
+        if user_chat_id is not None:
+            owner_notifications[msg.message_id] = user_chat_id
     except Exception as e:
         logging.error(f"Egaga xabar yuborishda xatolik: {e}")
+
+
+async def owner_reply_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Ega reply qilib mijozga javob yuborsa — botga o'rniga uni yetkazadi.
+    Qaytaradi: True — bu reply qayta ishlandi, False — bu oddiy xabar."""
+    replied = update.message.reply_to_message
+    if not replied:
+        return False
+
+    user_chat_id = owner_notifications.get(replied.message_id)
+    if not user_chat_id:
+        await update.message.reply_text(
+            "⚠️ Bu xabar mijozga bog'lanmagan. Faqat bot yuborgan bildirishnomalarga reply qiling."
+        )
+        return True
+
+    text = update.message.text
+    try:
+        await context.bot.send_message(chat_id=user_chat_id, text=text)
+        # Mijozning suhbat tarixiga qo'shamiz (Claude keyinchalik kontekstni bilsin)
+        conversations[user_chat_id].append({"role": "assistant", "content": text})
+        await update.message.reply_text("✅ Yuborildi")
+    except Exception as e:
+        logging.error(f"Egadan mijozga yuborishda xatolik: {e}")
+        await update.message.reply_text(f"❌ Yuborilmadi: {e}")
+
+    return True
 
 
 def user_info(update: Update) -> str:
@@ -156,7 +191,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Egaga yangi mijoz kelgani haqida xabar
     await notify_owner(
         context,
-        f"🆕 *Yangi mijoz botga kirdi*\n\n{user_info(update)}",
+        f"🆕 *Yangi mijoz botga kirdi*\n\n{user_info(update)}\n\n"
+        f"💡 Javob berish uchun shu xabarga *Reply* qiling.",
+        user_chat_id=update.effective_chat.id,
     )
 
 
@@ -169,8 +206,14 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Har qanday matn xabariga javob"""
     user_id = update.effective_user.id
-    user_text = update.message.text
 
+    # Agar EGA botga reply qilib yozayotgan bo'lsa — mijozga yetkazamiz, Claude'ga jo'natmaymiz
+    if user_id == OWNER_CHAT_ID and update.message.reply_to_message:
+        handled = await owner_reply_to_user(update, context)
+        if handled:
+            return
+
+    user_text = update.message.text
     conversations[user_id].append({"role": "user", "content": user_text})
     # Oxirgi 20 ta xabarni saqlaymiz (kontekst uzunligini tejash uchun)
     conversations[user_id] = conversations[user_id][-20:]
@@ -204,7 +247,9 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context,
             f"💬 *Yangi xabar*\n\n{user_info(update)}\n\n"
             f"📝 *Mijoz:*\n{user_text}\n\n"
-            f"🤖 *Bot javobi:*\n{reply}",
+            f"🤖 *Bot javobi:*\n{reply}\n\n"
+            f"💡 O'zingiz javob berish uchun shu xabarga *Reply* qiling.",
+            user_chat_id=update.effective_chat.id,
         )
 
     except Exception as e:
@@ -243,7 +288,9 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await notify_owner(
             context,
-            f"💰 *YANGI CHEK KELDI!*\n\n{user_info(update)}\n\n📝 Izoh: {izoh}",
+            f"💰 *YANGI CHEK KELDI!*\n\n{user_info(update)}\n\n📝 Izoh: {izoh}\n\n"
+            f"💡 Mijozga javob berish uchun shu xabarga *Reply* qiling.",
+            user_chat_id=update.effective_chat.id,
         )
     except Exception as e:
         logging.error(f"Chekni forward qilishda xatolik: {e}")
