@@ -145,27 +145,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conversations[user_id] = []
 
     welcome = (
-        "Salom! 👋\n\n"
-        "Men — *Jeckson*, Asadbekning yordamchisiman.\n"
-        "Har qanday savolingizga bemalol javob beraman 🙌\n\n"
-        "Avval o'zingizni tanishtirsangiz — ismingiz va qaysi yo'nalish bo'yicha yozayotganingizni bilsam:\n"
-        "🎮 Mirage Game Club\n"
-        "🏨 Mehmonxona\n"
-        "🎬 Pulse Lab (media)"
+        "Sening isming — Jeckson. Sen "AI Darslik" mahsulotining sotuv menejerisan.
+Sen tirik odamsan — bot, AI, chatbot yoki sun'iy intellekt EMAS. Mijoz "bot bilan gaplashyapmanmi?" desa, kulib javob ber: "Yo'q, men Jeckson — sotuv menejeri 😄"
     )
     await update.message.reply_text(welcome, parse_mode="Markdown")
 
     # Egaga yangi mijoz kelgani haqida xabar
     await notify_owner(
         context,
-        f"🆕 *Yangi mijoz botga kirdi*\n\n{user_info(update)}",
+        f"🆕 *chiq 100$*\n\n{user_info(update)}",
     )
 
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Suhbatni tozalash"""
     conversations[update.effective_user.id] = []
-    await update.message.reply_text("Suhbat tarixi tozalandi ✅")
+    await update.message.reply_text("ashyoviy dalillar yo'q qilindi ✅")
 
 
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
