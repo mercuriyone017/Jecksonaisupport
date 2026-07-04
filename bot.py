@@ -46,6 +46,14 @@ DB_PATH = os.environ.get("DB_PATH", "bot.db").strip()
 # Har bir mijoz uchun mahsulot narxi (statistika hisoblash uchun)
 PRICE_PER_SALE = 39000
 
+# To'lov ko'rsatmalari rasmi (Payme sahifasining screenshoti)
+# Sozlash: rasmni botga yuboring, /getphotoid buyrug'i bilan file_id oling,
+# uni Railway'ga PAYMENT_IMAGE_FILE_ID env variable sifatida qo'shing.
+PAYMENT_IMAGE_FILE_ID = os.environ.get("PAYMENT_IMAGE_FILE_ID", "").strip()
+
+# Claude javobida bu marker bo'lsa, javob bilan birga to'lov rasmi ham yuboriladi
+PAY_IMG_MARKER = "#TOLOV_RASMI"
+
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
@@ -100,7 +108,11 @@ Tolov qilish uchun rekvizitlar:
 💰 Summa: 39 000 som
 📝 Izohga (yoki user nomiga): AI darslik deb yozishni unutmang!
 
-Tolovni bajargach, chek rasmini shu yerga yuboring — tekshirib, darslar kanalining linkini beraman."
+Tolovni bajargach, chek rasmini shu yerga yuboring — tekshirib, darslar kanalining linkini beraman.
+
+#TOLOV_RASMI"
+
+MUHIM TEXNIK QOIDA: Tolov rekvizitlarini birinchi marta yozganingda javob oxiriga alohida qatorda #TOLOV_RASMI deb qosh. Bu mijozga korinmaydi — bot uni korib avtomatik Payme sahifasining rasmini ilova qiladi. Faqat DASTLABKI tolov korsatmalarida yoz. Boshqa savol-javoblarga #TOLOV_RASMI ni qoshma (masalan "kim otadi?", "keyin tolayman" kabi savollarga rasm kerak emas).
 
 ## 3-QADAM — Chek kelganda
 Mijoz chek yuborganda avtomatik javob keladi. Sen ham "Rahmat, [ism]! Tez orada aloqaga chiqamiz" degan uslubda tasdiqla.
@@ -994,6 +1006,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     caption = update.message.caption or ""
 
+    # Agar EGA rasmni "getid" izohi bilan yuborsa — file_id qaytaramiz
+    # (Payme sahifasining rasmini sozlash uchun)
+    if user_id == OWNER_CHAT_ID and caption.lower().strip() == "getid":
+        photo = update.message.photo[-1]
+        await update.message.reply_text(
+            f"📷 file_id:\n\n`{photo.file_id}`\n\n"
+            f"Uni Railway'ga PAYMENT_IMAGE_FILE_ID nomi bilan qo'shing.",
+            parse_mode="Markdown",
+        )
+        return
+
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id, action="typing"
     )
@@ -1145,9 +1168,26 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not reply:
             reply = "Uzr, javobda muammo boldi. Qaytadan yozing 🙏"
 
+        # #TOLOV_RASMI markerini topamiz — bo'lsa alohida rasm yuboramiz
+        send_payment_image = PAY_IMG_MARKER in reply
+        if send_payment_image:
+            reply = reply.replace(PAY_IMG_MARKER, "").strip()
+
         conversations[user_id].append({"role": "assistant", "content": reply})
         db_add_message(user_id, "assistant", reply)  # doimiy saqlash
+
         await update.message.reply_text(reply)
+
+        # To'lov ko'rsatmalari yuborilganda — rasmni ham qo'shamiz
+        if send_payment_image and PAYMENT_IMAGE_FILE_ID:
+            try:
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=PAYMENT_IMAGE_FILE_ID,
+                    caption="👆 Payme ilovasida shunday ko'rinishi kerak",
+                )
+            except Exception as e:
+                logger.warning(f"To'lov rasmini yuborishda xatolik: {e}")
 
         # Egaga xabar (ega ozini test qilsa yubormaymiz)
         if user_id != OWNER_CHAT_ID:
