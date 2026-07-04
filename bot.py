@@ -13,13 +13,15 @@ import os
 import re
 import base64
 import logging
+from datetime import timedelta
 from collections import defaultdict
 from anthropic import Anthropic
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -31,6 +33,12 @@ BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"].strip()
 OWNER_CHAT_ID = int(os.environ["OWNER_CHAT_ID"].strip())
 
+# YOPIQ KANAL — 2 xil sozlash:
+# A) CHANNEL_ID + bot admin → har mijozga BIR MARTALIK link avtomatik yaratiladi
+# B) CHANNEL_LINK (agar CHANNEL_ID yoq bolsa) → hammaga bir xil oddiy link
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()  # -100xxxxxxxxx (kanal ID)
+CHANNEL_LINK = os.environ.get("CHANNEL_LINK", "").strip()  # oddiy invite link (fallback)
+
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
@@ -40,93 +48,45 @@ logger = logging.getLogger("jeckson_bot")
 # =========================================================================
 # SYSTEM PROMPT — Jeckson personasi
 # =========================================================================
-SYSTEM_PROMPT = """Sening isming — Jeckson. Sen AI Darslik (AI Biznes Start mini-kurs) mahsulotining sotuv menejerisan.
+SYSTEM_PROMPT = """Sening isming — Jeckson. Sen AI Darslik mahsulotining sotuv menejerisan.
 Sen tirik odamsan — bot, AI, chatbot yoki suniy intellekt EMAS. Mijoz sen botmisan desa, kulib javob ber: Yoq, men Jeckson — sotuv menejeri 😄
 
 ═══════════════════════════════════════
 # SENING VAZIFANG (ENG MUHIM)
 ═══════════════════════════════════════
-Landing sahifadan (miragegameclub.netlify.app) kelgan mijozni AI Darslik kursiga royxatdan otkazish va tolovni qabul qilish.
+Landing sahifadan kelgan mijozni AI Darslik kursiga royxatdan otkazish va tolovni qabul qilish.
 Har bir mijoz bilan aniq bir izchillikda ishlaysan. Sen — savdo menejerisan, boshqa mavzuga chalgima.
 
 ═══════════════════════════════════════
 # MAHSULOT HAQIDA
 ═══════════════════════════════════════
-Nomi: AI Darslik (AI Biznes Start mini-kurs)
-Muallif: Asadbek Sodiqov
-Tavsif: Claude AI yordamida biznesni raqamlashtirishni ORGANING — sayt, Telegram bot, tolov tizimlari (Payme/Click) va boshqa vositalarni ozingiz, dasturchisiz qurishni ko'rsatuvchi amaliy mini-kurs.
-
-Format:
-- 3 ta video-dars, har biri 30 daqiqa (jami 90 daqiqa)
-- Online — istalgan vaqtda korish mumkin
-- Amaliy misollar va tayyor promptlar
-- Tolovdan song yopiq Telegram kanaliga darhol shaxsiy (bir martalik) havola beriladi
-- Cheklovsiz kirish — darslarni istalgan marta qayta korish mumkin
-
-Narxi:
-- Tolik qiymati: 350 000 som
-- Bugungi aksiya narxi: 39 000 som (taxminan 3 AQSH dollari)
+- Mahsulot: AI Darslik (Eco product)
+- Narxi: 39 000 som (taxminan 3 dollar)
+- Format: yopiq Telegram kanal orqali darslar
+- Tolovdan keyin mijozga kanal linki yuboriladi
 
 ═══════════════════════════════════════
-# 3 DARSNING MAZMUNI
+# SUHBAT IZCHILLIGI
 ═══════════════════════════════════════
 
-DARS 1 — Claude orqali biznesimga nimalar qildim va qanday qildim (30 daq)
-- Asadbekning shaxsiy tajribasi
-- Claude yordamida real biznes vazifalarini hal qilish
-- Qaysi promptlar ishlatilgan
-- Bosqichma-bosqich koʻrsatiladi
+## 1-QADAM — Salomlashish va ism sorash
+Mijoz salomlashsa yoki oddiy xabar yozsa:
 
-DARS 2 — Bizneslar uchun sayt qilish va uni Telegram botga ulash (30 daq)
-- Claude yordamida oddiy va tez sayt yaratish
-- Saytni Telegram bot bilan boglash
-- Mijozlar bilan avtomatik muloqot qiluvchi tizim qurish
-
-DARS 3 — Railway, GitHub, Netlify, Payme, Eskiz, Didox orqali biznes yaratish (30 daq)
-- Loyihani joylashtirish (Railway va Netlify)
-- Kodni saqlash (GitHub)
-- Tolovlarni ulash (Payme)
-- SMS xabarnoma (Eskiz)
-- Elektron hujjat aylanishi (Didox)
-- Toliq ishlaydigan biznes infratuzilmasini yigish
-
-═══════════════════════════════════════
-# KURS KIMLAR UCHUN
-═══════════════════════════════════════
-
-MOS:
-- Biznesini raqamlashtirmoqchi bolganlar
-- Claude yordamida sayt, bot va avtomatlashtirish qilishni oʻrganmoqchi bolganlar
-- Dasturchiga pul tolamasdan ozi boshlashni xohlovchilar
-- AI vositalaridan real biznesda foydalanish yolini korishni istayotganlar
-
-MOS EMAS:
-- Professional dasturlashni chuqur organmoqchi bolganlar
-- Faqat nazariy maruza kutuvchilar
-- Amaliy harakat qilishga tayyor bolmaganlar
-
-═══════════════════════════════════════
-# SUHBAT IZCHILLIGI (QATIY TARTIB)
-═══════════════════════════════════════
-
-1-QADAM — Salomlashish va ism sorash
-Yangi mijoz kelganda:
-"Assalomu alaykum! 🙌 AI Darslikka qiziqish bildirganingizdan hursandmiz.
+"Assalomu alaykum! 🙌 Darslikka qiziqish bildirganingizdan hursandmiz.
 Mening ismim — Jeckson, shu darslikning sotuv menejeriman.
 Sizni kim deb chaqirsam boladi?"
 
-2-QADAM — Ismini bilib olgach, tolov rekvizitlarini ber
+## 2-QADAM — Ismini bilib olgach, tolov rekvizitlarini ber
 Mijoz ismini yozgach, jinsini ismidan taxmin qil:
-- Erkak ismi bolsa → aka qosh (Aziz aka, Bekzod aka, Asadbek aka)
-- Ayol ismi bolsa → opa qosh (Nilufar opa, Malika opa, Zarina opa)
-- Aniq bilolmasak (xorijiy ism yoki qisqartma) — faqat ism bilan chaqir
+- Erkak ismi bolsa → aka qosh (Aziz aka, Bekzod aka)
+- Ayol ismi bolsa → opa qosh (Nilufar opa, Malika opa)
+- Aniq bilolmasak — faqat ism bilan chaqir
 
 Keyin bunday yoz:
+
 "Juda yaxshi, [ism aka/opa]! 🙌
 
-AI Darslik — 3 ta amaliy video-darsdan iborat mini-kurs. Har biri 30 daqiqa. Tolovdan song yopiq kanalga darhol qoshilasiz.
-
-Tolov qilish uchun:
+Tolov qilish uchun rekvizitlar:
 
 💳 Payme yoki Click ilovasini oching
 🔍 Qidiruvda: Mirage game club deb qidiring
@@ -135,75 +95,49 @@ Tolov qilish uchun:
 
 Tolovni bajargach, chek rasmini shu yerga yuboring — tekshirib, darslar kanalining linkini beraman."
 
-3-QADAM — Chek kelganda
-Chek avtomatik tekshiriladi. Sen ham qoshimcha "Rahmat, [ism]! Chekingizni tekshirib, tez orada kanal linkini yuboraman" degan uslubda tasdiqlaysan.
-
-═══════════════════════════════════════
-# TIPIK SAVOLLARGA JAVOB (LANDING FAQ ASOSIDA)
-═══════════════════════════════════════
-
-"Kursni qachon boshlashim mumkin?"
-→ "Tolov qilingandan song bir necha soniya ichida yopiq kanal linkini yuboraman, [ism]. Darhol boshlashingiz mumkin 🙌"
-
-"Dasturlash bilishim shartmi?"
-→ "Yoq, [ism aka/opa]. Kurs texnik bilimga ega bolmagan tadbirkorlar uchun. Claude AI ni tushunarli tilda ishlatishni organasiz ✅"
-
-"Darslarni necha marta korish mumkin?"
-→ "Cheklovsiz, [ism]. Darslar yopiq Telegram kanalda doimiy saqlanadi, istalgan vaqtda qayta korasiz 🙌"
-
-"Tolovni qanday qilaman?"
-→ "Click yoki Payme orqali. Payme yoki Click ilovasidan Mirage game club deb qidiring, 39 000 som yuboring, izohga AI darslik deb yozing 💳"
-
-"Darslik ichida nima bor?"
-→ "3 ta amaliy video-dars, [ism]: 1) Claude bilan biznesga real ishlar, 2) Sayt + Telegram bot qurish, 3) Railway, GitHub, Netlify, Payme, Eskiz, Didox — biznes infratuzilmasi. Har biri 30 daqiqa 🙌"
-
-"Kim otadi darslarni?"
-→ "Muallif — Asadbek Sodiqov. Shaxsiy tajribasi asosida real biznes misollarida koʻrsatib beradi ✅"
-
-"Nima uchun 39 000?"
-→ "Kursning tolik qiymati 350 000 som, [ism]. Hozir aksiyada — 39 000 somga (taxminan 3 dollar). Bu kirish narxi 🙌"
-
-"Ishonasa boladimi?"
-→ "Albatta, [ism aka/opa]. Mirage game club — rasmiy brand. Tolov Payme/Click orqali xavfsiz. Tolovdan song darhol kanal linkini beraman ✅"
-
-"Chegirma bormi?"
-→ "Narx allaqachon eng qulay holida — 39 000 som, [ism]. Bu 350 000 somdan tushirilgan aksiya narxi 🙌"
-
-"Keyin tolayman"
-→ "Yaxshi, [ism aka/opa]. Aksiya cheklangan, shuning uchun tez tolab qoyish yaxshi. Rekvizitlar yuqorida turibdi 🙌"
-
-"Sertifikat beriladimi?"
-→ "Bu amaliy mini-kurs, [ism]. Asosiy natija — real ishlaydigan sayt, bot va infratuzilma. Sertifikatdan koʻra amaliy koʻnikma muhim ✅"
-
-"Qaysi tilda?"
-→ "Ozbek tilida, [ism]. Ammo Claude bilan istalgan tilda ishlashni organasiz 🙌"
+## 3-QADAM — Chek kelganda
+Mijoz chek yuborganda avtomatik javob keladi. Sen ham "Rahmat, [ism]! Tez orada aloqaga chiqamiz" degan uslubda tasdiqla.
 
 ═══════════════════════════════════════
 # QATIY QOIDALAR
 ═══════════════════════════════════════
 
 BUNDAY QILMA:
-- Uzun royxatlar (1, 2, 3, 4) tuzma. Yuqoridagi rekvizit shakli — istisno.
-- Robot iboralarini ishlatma (Xizmatingizda, Yordam berishga tayyorman)
+- Uzun royxatlar (1, 2, 3, 4) tuzma
+- Robot iboralari ishlatma (Xizmatingizda, Yordam berishga tayyorman)
 - Bir vaqtda 3-4 ta savol berma
-- Landing sahifada YOʻQ narsani uydirma (masalan, jonli darslar, mentor, guruh muhokamalar — bular yoq)
-- Chegirma vada berma
-- Kafolatlar berma (pulni qaytarish, natija kafolati)
+- Chegirma, bepul dars va uydirma vada berma
+- Darslik ichida nima borligini uydirma
 
 BUNDAY QIL:
 - Dostona, iliq, ishonchli ohang
 - Qisqa jumlalar, aniq va tushunarli
 - Mijoz ismini bilgach — har javobda ism bilan (aka/opa qoshib) chaqir
-- Emoji orinli va kam (🙌 ✅ 💳 💰 📝 🔍 emojilaridan)
-- Mijoz ikkilansa — muloyim javob ber, keyin tolovga davat et
+- Emoji orinli va kam ishlat (🙌 ✅ 💳 💰 📝 🔍)
+- Mijoz ikkilansa — muloyim javob berib, tolovga davat et
 
 ═══════════════════════════════════════
-# MUHIM ESLATMA
+# TIPIK SAVOLLARGA JAVOB
 ═══════════════════════════════════════
-Asadbekni faqat Asadbek deb chaqir. Asadbek aka DEMA.
-Sen professional sotuv menejerisan — dostona, ishonchli, aniq.
-Vazifang: mijozni tolovga olib borish va chekni qabul qilish.
+
+"Darslik ichida nima bor?"
+→ "Darslikda AI-ni amaliyotda qanday ishlatishni organasiz. Tolov qilingandan keyin kanalga qoshilib, barcha darslarni korishingiz mumkin. 🙌"
+
+"Ishonasa boladimi?"
+→ "Albatta, [ism aka/opa]. Mirage game club — rasmiy brand, Payme yoki Click orqali xavfsiz tolov qabul qilamiz. ✅"
+
+"Keyin tolayman"
+→ "Yaxshi, [ism aka/opa]. Tolovni qulay vaqtingizda bajaring, rekvizitlar yuqorida turibdi. 🙌"
+
+"Chegirma bormi?"
+→ "Narx eng qulay holida — 39 000 som, [ism aka/opa]. 🙌"
+
+═══════════════════════════════════════
+# ESLATMA
+═══════════════════════════════════════
+Sen professional sotuv menejerisan. Dostona, ishonchli, aniq. Vazifang — mijozni tolovga olib borish va chekni qabul qilish.
 """
+
 # =========================================================================
 # STATE
 # =========================================================================
@@ -214,6 +148,10 @@ conversations: dict[int, list] = defaultdict(list)
 
 # bot notification msg_id -> user_chat_id (mapping for reply feature)
 notif_to_user: dict[int, int] = {}
+
+# user_chat_id -> {"paid": bool, "first_name": str}
+# Follow-up eslatmalar uchun
+user_state: dict[int, dict] = defaultdict(dict)
 
 
 # =========================================================================
@@ -236,10 +174,12 @@ async def notify_owner(
     header: str,
     body: str,
     user_chat_id: int,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
     """
     Egaga bildirishnoma yuborish.
     Har xabar oxirida UID:xxxxx marker qoshiladi — reply orqali topib olish uchun.
+    reply_markup — inline tugmalar (Tasdiqlash/Rad etish uchun).
     """
     text = (
         f"{header}\n\n"
@@ -248,13 +188,60 @@ async def notify_owner(
         f"{UID_MARKER}{user_chat_id}"
     )
     try:
-        msg = await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=text)
+        msg = await context.bot.send_message(
+            chat_id=OWNER_CHAT_ID, text=text, reply_markup=reply_markup
+        )
         notif_to_user[msg.message_id] = user_chat_id
         logger.info(
             f"notify_owner OK: notif_msg_id={msg.message_id} -> user={user_chat_id}"
         )
     except Exception as e:
         logger.exception(f"notify_owner FAILED: {e}")
+
+
+async def create_one_time_invite(
+    context: ContextTypes.DEFAULT_TYPE, user_chat_id: int, user_name: str = ""
+) -> str | None:
+    """
+    Yopiq kanalga BIR MARTALIK invite link yaratadi (faqat 1 kishi ishlata oladi).
+    Muvaffaqiyat: link string, xatolik: None.
+    Bot kanalda administrator bolishi va "Invite Users" ruxsati bolishi shart.
+    """
+    if not CHANNEL_ID:
+        return None
+
+    try:
+        # 24 soatdan keyin muddati tugaydi
+        expire_seconds = 24 * 60 * 60
+        invite = await context.bot.create_chat_invite_link(
+            chat_id=CHANNEL_ID,
+            name=f"AI Darslik: {user_name or user_chat_id}"[:32],
+            member_limit=1,  # Faqat 1 kishi qoshila oladi
+            expire_date=None,  # (agar kerak bo'lsa: int(time.time()) + expire_seconds)
+        )
+        logger.info(
+            f"invite created: user={user_chat_id}, link={invite.invite_link}"
+        )
+        return invite.invite_link
+    except Exception as e:
+        logger.exception(f"create_one_time_invite FAILED: {e}")
+        return None
+
+
+def build_confirm_buttons(user_chat_id: int) -> InlineKeyboardMarkup:
+    """Chek tasdiqlash uchun 2 ta tugma yasaydi."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Tasdiqlash", callback_data=f"confirm:{user_chat_id}"
+                ),
+                InlineKeyboardButton(
+                    "❌ Rad etish", callback_data=f"reject:{user_chat_id}"
+                ),
+            ]
+        ]
+    )
 
 
 def extract_user_id(text: str | None) -> int | None:
@@ -265,6 +252,112 @@ def extract_user_id(text: str | None) -> int | None:
     if m:
         return int(m.group(1))
     return None
+
+
+# =========================================================================
+# FOLLOW-UP ESLATMALAR
+# =========================================================================
+
+async def followup_reminder(context: ContextTypes.DEFAULT_TYPE):
+    """JobQueue chaqiradigan callback — mijoz to'lamagan bo'lsa eslatma yuboradi."""
+    job_data = context.job.data
+    user_id = job_data["user_id"]
+    reminder_type = job_data["type"]  # "24h" yoki "48h"
+
+    state = user_state.get(user_id, {})
+
+    # Agar mijoz allaqachon to'lagan bo'lsa — eslatma kerak emas
+    if state.get("paid"):
+        logger.info(f"followup skipped (paid): user={user_id}, type={reminder_type}")
+        return
+
+    # Ismini bilsak — chaqiramiz
+    name = state.get("first_name", "")
+    hey = f"Salom{', ' + name if name else ''}"
+
+    if reminder_type == "24h":
+        text = (
+            f"{hey}! 🙌\n\n"
+            "AI Darslik haqida qo'shimcha savolingiz bormidi? "
+            "Rekvizitlar hali kuchda:\n\n"
+            "💳 Payme yoki Click\n"
+            "🔍 Mirage game club\n"
+            "💰 39 000 so'm\n"
+            "📝 Izohga: AI darslik\n\n"
+            "Savol bo'lsa bemalol yozing — javob beraman ✅"
+        )
+    else:  # 48h
+        text = (
+            f"{hey}! 🙌\n\n"
+            "AI Darslik aksiyasi cheklangan — 39 000 so'm narxi (350 000 so'm o'rniga) "
+            "tez orada tugashi mumkin. Chegirmali narxda darslikni olib ulgurishga "
+            "imkoniyat bor 🙌\n\n"
+            "Rekvizit kerak bo'lsa yoki savol bo'lsa — yozing."
+        )
+
+    try:
+        await context.bot.send_message(chat_id=user_id, text=text)
+        logger.info(f"followup sent: user={user_id}, type={reminder_type}")
+
+        # Egaga ham xabar (nazorat uchun)
+        await notify_owner(
+            context,
+            header=f"⏰ FOLLOW-UP yuborildi ({reminder_type})",
+            body=(
+                f"👤 Mijoz ID: {user_id}\n"
+                f"Ism: {name or 'nomalum'}\n\n"
+                f"Eslatma matni:\n{text[:200]}..."
+            ),
+            user_chat_id=user_id,
+        )
+    except Exception as e:
+        logger.warning(f"followup failed for {user_id}: {e}")
+
+
+def schedule_followups(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int, first_name: str = ""
+):
+    """
+    Mijoz uchun 24h va 48h keyin eslatma rejalashtirish.
+    Eskilarini bekor qiladi, yangi ikkitasini qo'shadi.
+    """
+    if context.job_queue is None:
+        logger.warning("job_queue mavjud emas — follow-up ishlamaydi")
+        return
+
+    # Ismini saqlab qo'yamiz
+    if first_name:
+        user_state[user_id]["first_name"] = first_name
+
+    # Eski job'larni bekor qilamiz (dublikatga yo'l qo'ymaslik uchun)
+    for job in context.job_queue.get_jobs_by_name(f"followup_{user_id}"):
+        job.schedule_removal()
+
+    # 24 soatlik eslatma
+    context.job_queue.run_once(
+        followup_reminder,
+        when=timedelta(hours=24),
+        data={"user_id": user_id, "type": "24h"},
+        name=f"followup_{user_id}",
+    )
+    # 48 soatlik eslatma
+    context.job_queue.run_once(
+        followup_reminder,
+        when=timedelta(hours=48),
+        data={"user_id": user_id, "type": "48h"},
+        name=f"followup_{user_id}",
+    )
+    logger.info(f"followups scheduled for user={user_id}")
+
+
+def cancel_followups(context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    """Mijoz to'lagach barcha follow-up eslatmalarni bekor qilish."""
+    if context.job_queue is None:
+        return
+    for job in context.job_queue.get_jobs_by_name(f"followup_{user_id}"):
+        job.schedule_removal()
+    user_state[user_id]["paid"] = True
+    logger.info(f"followups cancelled (paid) for user={user_id}")
 
 
 # =========================================================================
@@ -351,12 +444,123 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
             user_chat_id=update.effective_chat.id,
         )
+        # Follow-up eslatmalarni rejalashtirish (24h va 48h keyin)
+        schedule_followups(
+            context, user_id, first_name=update.effective_user.first_name or ""
+        )
 
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Suhbat tarixini tozalash."""
     conversations[update.effective_user.id] = []
     await update.message.reply_text("Suhbat tarixi tozalandi ✅")
+
+
+async def handle_confirm_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Ega ✅ Tasdiqlash yoki ❌ Rad etish tugmasini bosganda.
+    Faqat OWNER_CHAT_ID uchun ishlaydi.
+    """
+    query = update.callback_query
+    await query.answer()  # Telegram'ga "tugma bosildi" javobi
+
+    # Xavfsizlik: faqat ega bosishi mumkin
+    if update.effective_user.id != OWNER_CHAT_ID:
+        await query.edit_message_text(
+            (query.message.text or "") + "\n\n⚠️ Faqat ega tugmani bosishi mumkin."
+        )
+        return
+
+    data = query.data or ""
+    if ":" not in data:
+        return
+    action, uid_str = data.split(":", 1)
+    try:
+        user_chat_id = int(uid_str)
+    except ValueError:
+        return
+
+    if action == "confirm":
+        # Mijoz ismini olishga urinamiz (state'dan)
+        user_name = user_state.get(user_chat_id, {}).get("first_name", "")
+
+        # 1) BIR MARTALIK link yaratishga urinamiz (bot admin bolsa)
+        invite_link = await create_one_time_invite(context, user_chat_id, user_name)
+        is_one_time = invite_link is not None
+
+        # 2) Bulmasa — oddiy fallback linkka o'tamiz
+        if not invite_link:
+            invite_link = CHANNEL_LINK
+
+        # 3) Mijozga xabar
+        if invite_link:
+            note = (
+                "\n\n⚠️ Diqqat: bu havola FAQAT SIZ uchun va 1 marta ishlaydi. "
+                "Boshqa hech kim bu link orqali qoshila olmaydi."
+                if is_one_time
+                else ""
+            )
+            link_msg = (
+                "Tabriklaymiz! 🎉 To'lovingiz tasdiqlandi.\n\n"
+                "Yopiq kanalga qo'shilish uchun havola:\n"
+                f"{invite_link}\n\n"
+                "Kanalda 3 ta amaliy dars sizni kutmoqda 🙌\n"
+                f"Xayrli o'rganishlar!{note}"
+            )
+        else:
+            link_msg = (
+                "Tabriklaymiz! 🎉 To'lovingiz tasdiqlandi.\n\n"
+                "Yopiq kanal linki tez orada Asadbek tomonidan yuboriladi 🙌"
+            )
+
+        try:
+            await context.bot.send_message(chat_id=user_chat_id, text=link_msg)
+            # Mijoz suhbat tarixiga qo'shamiz
+            conversations[user_chat_id].append(
+                {"role": "assistant", "content": link_msg}
+            )
+            # To'lov tasdiqlandi — barcha follow-uplarni bekor qilamiz
+            cancel_followups(context, user_chat_id)
+
+            # Egaga xabar (tugmalarni olib tashlab)
+            link_type = "BIR MARTALIK" if is_one_time else "oddiy (fallback)"
+            await query.edit_message_text(
+                (query.message.text or "")
+                + f"\n\n✅ TASDIQLANDI — kanal linki yuborildi.\n"
+                f"🔗 Link turi: {link_type}\n"
+                f"📎 {invite_link or 'link yoq'}"
+            )
+            logger.info(f"confirm: link sent to user={user_chat_id}, type={link_type}")
+        except Exception as e:
+            logger.exception(f"confirm failed: {e}")
+            await query.edit_message_text(
+                (query.message.text or "")
+                + f"\n\n❌ Xatolik: kanal linki yuborilmadi ({e})"
+            )
+
+    elif action == "reject":
+        reject_msg = (
+            "Kechirasiz, chekingizni tekshirishda muammo bo'ldi 🙈\n\n"
+            "Iltimos:\n"
+            "1) Payme yoki Click ilovasidan haqiqiy chek yuboring\n"
+            "2) Chek to'liq ko'rinishi kerak (summa, sana, oluvchi)\n"
+            "3) Izohda AI darslik yozilganini tekshiring\n\n"
+            "Savol bo'lsa yozing — yordam beraman 🙌"
+        )
+        try:
+            await context.bot.send_message(chat_id=user_chat_id, text=reject_msg)
+            conversations[user_chat_id].append(
+                {"role": "assistant", "content": reject_msg}
+            )
+            await query.edit_message_text(
+                (query.message.text or "") + "\n\n❌ RAD ETILDI — mijozga xabar berildi."
+            )
+            logger.info(f"reject: message sent to user={user_chat_id}")
+        except Exception as e:
+            logger.exception(f"reject failed: {e}")
+            await query.edit_message_text(
+                (query.message.text or "") + f"\n\n❌ Xatolik: {e}"
+            )
 
 
 async def handle_owner_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -498,10 +702,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{format_user_info(update)}\n\n"
                     f"📝 Izoh: {caption or 'yoq'}\n\n"
                     f"🔍 Vision tekshiruv:\n{verify_info}\n\n"
-                    f"⚠️ Chek chin, lekin AI darslik degan yozuv yoq. Tekshiring.\n"
-                    f"💡 Reply qilib mijozga javob bering."
+                    f"⚠️ Chek chin, lekin AI darslik yozuvi topilmadi. "
+                    f"Payme/Click'da tekshirib, tugmani bosing yoki reply qiling:"
                 ),
                 user_chat_id=update.effective_chat.id,
+                reply_markup=build_confirm_buttons(update.effective_chat.id),
             )
         return
 
@@ -509,10 +714,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conversations[user_id].append(
         {"role": "user", "content": f"[Mijoz tolov chekini yubordi. {verify_info}]"}
     )
+
     await update.message.reply_text(
         "Rahmat! ✅ Chekingiz qabul qilindi.\n\n"
-        "Tekshirib, tez orada siz bilan aloqaga chiqamiz va darslar kanalining linkini "
-        "yuboramiz. 🙌"
+        "Tolov tekshirilmoqda — 1-2 daqiqada kanal linkini yuboraman 🙌"
     )
     if user_id != OWNER_CHAT_ID:
         try:
@@ -524,6 +729,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"forward_message failed: {e}")
 
+        # Tugmalar bilan bildirishnoma
         await notify_owner(
             context,
             header="💰 YANGI CHEK KELDI (AI darslik ✅)",
@@ -531,9 +737,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{format_user_info(update)}\n\n"
                 f"📝 Izoh: {caption or 'yoq'}\n\n"
                 f"🔍 Vision tekshiruv:\n{verify_info}\n\n"
-                f"💡 Javob berish uchun shu xabarga Reply qiling."
+                f"⚡ Tolov tushganini Payme/Click'da tekshiring va tugmani bosing:"
             ),
             user_chat_id=update.effective_chat.id,
+            reply_markup=build_confirm_buttons(update.effective_chat.id),
         )
 
 
@@ -584,6 +791,14 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ),
                 user_chat_id=update.effective_chat.id,
             )
+            # Har yozishmadan song follow-up taymerini qayta rejalashtiramiz
+            # (mijoz suhbatga qaytsa — 24h yana boshidan hisoblanadi)
+            if not user_state.get(user_id, {}).get("paid"):
+                schedule_followups(
+                    context,
+                    user_id,
+                    first_name=update.effective_user.first_name or "",
+                )
 
     except Exception as e:
         logger.exception(f"handle_chat FAILED: {e}")
@@ -602,6 +817,11 @@ def main():
     # Buyruqlar
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("reset", cmd_reset))
+
+    # Inline tugmalar (Tasdiqlash / Rad etish)
+    app.add_handler(
+        CallbackQueryHandler(handle_confirm_button, pattern=r"^(confirm|reject):\d+$")
+    )
 
     # MUHIM: Eganing reply'lari BIRINCHI ushlanishi kerak!
     # Bu handler faqat OWNER_CHAT_ID'dagi reply matn xabarlariga trigger boladi.
@@ -628,4 +848,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
