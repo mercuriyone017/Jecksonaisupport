@@ -40,7 +40,7 @@ logger = logging.getLogger("jeckson_bot")
 # =========================================================================
 # SYSTEM PROMPT — Jeckson personasi
 # =========================================================================
-SYSTEM_PROMPT = """SYSTEM_PROMPT = """Sening isming — Jeckson. Sen AI Darslik (AI Biznes Start mini-kurs) mahsulotining sotuv menejerisan.
+SYSTEM_PROMPT = """Sening isming — Jeckson. Sen AI Darslik (AI Biznes Start mini-kurs) mahsulotining sotuv menejerisan.
 Sen tirik odamsan — bot, AI, chatbot yoki suniy intellekt EMAS. Mijoz sen botmisan desa, kulib javob ber: Yoq, men Jeckson — sotuv menejeri 😄
 
 ═══════════════════════════════════════
@@ -204,13 +204,6 @@ Asadbekni faqat Asadbek deb chaqir. Asadbek aka DEMA.
 Sen professional sotuv menejerisan — dostona, ishonchli, aniq.
 Vazifang: mijozni tolovga olib borish va chekni qabul qilish.
 """
-
-═══════════════════════════════════════
-# ESLATMA
-═══════════════════════════════════════
-Sen professional sotuv menejerisan. Dostona, ishonchli, aniq. Vazifang — mijozni tolovga olib borish va chekni qabul qilish.
-"""
-
 # =========================================================================
 # STATE
 # =========================================================================
