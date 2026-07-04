@@ -1,5 +1,6 @@
 import os
 import re
+import base64
 import logging
 from collections import defaultdict
 from anthropic import Anthropic
@@ -276,27 +277,128 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def verify_receipt(image_bytes: bytes) -> tuple[bool, str]:
+    """Rasmni Claude Vision orqali tekshiradi: chek yoki oddiy rasm?
+    Qaytaradi: (chek_ekanmi, izoh_matni)"""
+    try:
+        image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+
+        response = client.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=300,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": image_b64,
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": (
+                                "Bu rasm to'lov cheki (kvitansiya)mi? "
+                                "Payme, Click, Uzum, Humo yoki boshqa bank/to'lov "
+                                "tizimidan olingan chek/tranzaksiya tasdig'i bo'lishi mumkin. "
+                                "Chek belgilari: summa, sana, karta raqami, tranzaksiya ID, "
+                                "'Uspeshno', 'Muvaffaqiyatli', 'Отправлено' kabi so'zlar.\n\n"
+                                "FAQAT quyidagi formatda javob ber:\n"
+                                "CHEK: HA yoki YOQ\n"
+                                "SUMMA: [ko'ringan summa yoki 'aniqmas']\n"
+                                "IZOH: [1 gap]"
+                            ),
+                        },
+                    ],
+                }
+            ],
+        )
+
+        text = ""
+        for block in response.content:
+            if getattr(block, "type", None) == "text":
+                text = block.text
+                break
+
+        # Javobni tahlil qilish
+        is_receipt = bool(re.search(r"CHEK:\s*HA", text, re.IGNORECASE))
+        return is_receipt, text
+
+    except Exception as e:
+        logging.error(f"Chekni tekshirishda xatolik: {e}")
+        # Xatolik bo'lsa — chek deb hisoblab, egaga yuboramiz (mijozni yo'qotmaslik uchun)
+        return True, f"Tekshirib bo'lmadi ({e})"
+
+
 async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mijoz chek (rasm) yuborganda"""
+    """Mijoz rasm yuborganda — chek ekanini tekshirib, mos ravishda javob beramiz"""
     user_id = update.effective_user.id
     caption = update.message.caption or ""
     izoh = caption if caption else "yoq"
 
-    # Suhbat tarixiga chek yuborilganini qo'shamiz (Claude bilishi uchun)
+    # "Yozmoqda..." ko'rsatamiz — tekshiruv 3-5 soniya davom etadi
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id, action="typing"
+    )
+
+    # Rasmni yuklab olamiz
+    try:
+        photo = update.message.photo[-1]  # eng yuqori sifatli variant
+        file = await context.bot.get_file(photo.file_id)
+        image_bytes = bytes(await file.download_as_bytearray())
+    except Exception as e:
+        logging.error(f"Rasmni yuklashda xatolik: {e}")
+        await update.message.reply_text("Rasmni yuklab bo'lmadi, qaytadan yuboring 🙏")
+        return
+
+    # Chek ekanini tekshirish
+    is_receipt, verify_info = await verify_receipt(image_bytes)
+
+    if not is_receipt:
+        # Chek EMAS — mijozga muloyim javob
+        await update.message.reply_text(
+            "Bu rasm to'lov chekiga o'xshamayapti 🙈\n\n"
+            "Iltimos, *Payme* yoki *Click* ilovasidan olingan to'lov tasdig'ini "
+            "(chek/kvitansiya) yuboring. Odatda unda summa, sana va "
+            "\"Muvaffaqiyatli\" degan yozuv bo'ladi. 🙌",
+            parse_mode="Markdown",
+        )
+        # Egaga ham xabar (nazorat uchun)
+        try:
+            await context.bot.forward_message(
+                chat_id=OWNER_CHAT_ID,
+                from_chat_id=update.effective_chat.id,
+                message_id=update.message.message_id,
+            )
+            await notify_owner(
+                context,
+                f"⚠️ *Chek EMAS rasm keldi*\n\n{user_info(update)}\n\n"
+                f"🔍 Tekshiruv:\n{verify_info}\n\n"
+                f"📝 Izoh: {izoh}\n\n"
+                f"💡 Kerak bo'lsa, shu xabarga Reply qilib mijozga yozing.",
+                user_chat_id=update.effective_chat.id,
+            )
+        except Exception as e:
+            logging.error(f"Egaga xabar yuborishda xatolik: {e}")
+        return
+
+    # CHEK — hammasi joyida
     conversations[user_id].append(
         {
             "role": "user",
-            "content": f"[Mijoz tolov chekini rasm korinishida yubordi. Izoh: {izoh}]",
+            "content": f"[Mijoz tolov chekini yubordi. Tekshiruv: {verify_info}]",
         }
     )
 
-    # Mijozga tasdiq javob
     await update.message.reply_text(
         "Rahmat! ✅ Chekingiz qabul qilindi.\n\n"
         "Tekshirib, tez orada siz bilan aloqaga chiqamiz va darslar kanalining linkini yuboramiz. 🙌"
     )
 
-    # Egaga chekni forward qilish (Asadbekka)
+    # Egaga chekni forward qilish
     try:
         await context.bot.forward_message(
             chat_id=OWNER_CHAT_ID,
@@ -305,7 +407,9 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await notify_owner(
             context,
-            f"💰 *YANGI CHEK KELDI!*\n\n{user_info(update)}\n\n📝 Izoh: {izoh}\n\n"
+            f"💰 *YANGI CHEK KELDI!*\n\n{user_info(update)}\n\n"
+            f"🔍 Tekshiruv:\n{verify_info}\n\n"
+            f"📝 Izoh: {izoh}\n\n"
             f"💡 Mijozga javob berish uchun shu xabarga *Reply* qiling.",
             user_chat_id=update.effective_chat.id,
         )
