@@ -13,6 +13,8 @@ import os
 import re
 import base64
 import sqlite3
+import asyncio
+import functools
 import logging
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
@@ -26,6 +28,8 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+
+import payme_merchant
 
 # =========================================================================
 # SOZLAMALAR (Environment Variables)
@@ -53,6 +57,11 @@ PAYMENT_IMAGE_FILE_ID = os.environ.get("PAYMENT_IMAGE_FILE_ID", "").strip()
 
 # Claude javobida bu marker bo'lsa, javob bilan birga to'lov rasmi ham yuboriladi
 PAY_IMG_MARKER = "#TOLOV_RASMI"
+
+# Claude javobida bu marker bo'lsa, Payme orqali AVTOMATIK to'lov tugmasi (real checkout
+# havolasi) ham yuboriladi. To'lov Payme serverida tasdiqlangach (PerformTransaction),
+# mijozga kanal linki avtomatik yuboriladi - ega tasdiqlashi shart emas.
+PAYME_LINK_MARKER = "#PAYME_TOLOV"
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -101,18 +110,20 @@ Keyin bunday yoz:
 
 "Juda yaxshi, [ism aka/opa]! 🙌
 
-Tolov qilish uchun rekvizitlar:
+Tolov qilish uchun 2 xil yol bor:
 
-💳 Payme yoki Click ilovasini oching
-🔍 Qidiruvda: Mirage game club deb qidiring
-💰 Summa: 39 000 som
-📝 Izohga (yoki user nomiga): AI darslik deb yozishni unutmang!
+1) Pastdagi tugma orqali Payme'da AVTOMATIK tolash — tolov otgach darhol kanal linki keladi ✅
+2) Yoki Click ilovasidan qolda tolab, chek rasmini shu yerga yuborish (biroz vaqt olishi mumkin)
 
-Tolovni bajargach, chek rasmini shu yerga yuboring — tekshirib, darslar kanalining linkini beraman.
+Summa: 39 000 som
 
-#TOLOV_RASMI"
+#TOLOV_RASMI
+#PAYME_TOLOV"
 
-MUHIM TEXNIK QOIDA: Tolov rekvizitlarini birinchi marta yozganingda javob oxiriga alohida qatorda #TOLOV_RASMI deb qosh. Bu mijozga korinmaydi — bot uni korib avtomatik Payme sahifasining rasmini ilova qiladi. Faqat DASTLABKI tolov korsatmalarida yoz. Boshqa savol-javoblarga #TOLOV_RASMI ni qoshma (masalan "kim otadi?", "keyin tolayman" kabi savollarga rasm kerak emas).
+MUHIM TEXNIK QOIDA: Tolov korsatmalarini birinchi marta yozganingda javob oxiriga alohida qatorlarda #TOLOV_RASMI va #PAYME_TOLOV deb qosh. Bu ikkalasi ham mijozga korinmaydi:
+- #TOLOV_RASMI ni korib bot avtomatik Payme/Click qolda tolov korsatmasi rasmini ilova qiladi.
+- #PAYME_TOLOV ni korib bot avtomatik ravishda REAL Payme tolov tugmasini (checkout havolasi) yaratib yuboradi — mijoz shu tugmani bosib karta malumotlarini kiritib tolaydi, tolov muvaffaqiyatli otgach kanal linki AVTOMATIK yuboriladi.
+Faqat DASTLABKI tolov korsatmalarida shu ikkala markerni qosh. Boshqa savol-javoblarga (masalan "kim otadi?", "keyin tolayman" kabi) markerlarni qoshma.
 
 ## 3-QADAM — Chek kelganda
 Mijoz chek yuborganda avtomatik javob keladi. Sen ham "Rahmat, [ism]! Tez orada aloqaga chiqamiz" degan uslubda tasdiqla.
@@ -600,7 +611,7 @@ async def followup_reminder(context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Ismini bilsak — chaqiramiz
-    name = state.get("first_name", "")
+    name = user_state.get(user_id, {}).get("first_name", "")
     hey = f"Salom{', ' + name if name else ''}"
 
     if reminder_type == "24h":
@@ -1173,6 +1184,11 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if send_payment_image:
             reply = reply.replace(PAY_IMG_MARKER, "").strip()
 
+        # #PAYME_TOLOV markerini topamiz — bo'lsa real Payme checkout tugmasini yuboramiz
+        send_payme_button = PAYME_LINK_MARKER in reply
+        if send_payme_button:
+            reply = reply.replace(PAYME_LINK_MARKER, "").strip()
+
         conversations[user_id].append({"role": "assistant", "content": reply})
         db_add_message(user_id, "assistant", reply)  # doimiy saqlash
 
@@ -1188,6 +1204,25 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             except Exception as e:
                 logger.warning(f"To'lov rasmini yuborishda xatolik: {e}")
+
+        # Payme AVTOMATIK tolov tugmasi - real checkout havolasi bilan
+        if send_payme_button:
+            try:
+                order_id = payme_merchant.create_order(
+                    chat_id=update.effective_chat.id, amount_sum=PRICE_PER_SALE
+                )
+                checkout_url = payme_merchant.build_checkout_url(order_id)
+                keyboard = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("💳 Payme orqali avtomatik to'lash", url=checkout_url)]]
+                )
+                await update.message.reply_text(
+                    "👆 Yoki quyidagi tugma orqali Payme'da xavfsiz va avtomatik to'lang. "
+                    "To'lov o'tgach kanal linki darhol keladi:",
+                    reply_markup=keyboard,
+                )
+                logger.info(f"Payme buyurtma yaratildi: order_id={order_id}, chat_id={update.effective_chat.id}")
+            except Exception as e:
+                logger.exception(f"Payme tugmasini yaratishda xatolik: {e}")
 
         # Egaga xabar (ega ozini test qilsa yubormaymiz)
         if user_id != OWNER_CHAT_ID:
@@ -1216,6 +1251,93 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Uzr, texnik nosozlik yuz berdi. Biroz kutib qaytadan urinib koring 🙏"
         )
+
+
+# =========================================================================
+# PAYME - to'lov muvaffaqiyatli/bekor bo'lganda chaqiriladigan callbacklar
+# =========================================================================
+
+class _FakeContext:
+    """
+    payme_merchant webhookidan kelganda bizda haqiqiy PTB `context` obyekti
+    bo'lmaydi (u faqat Telegram update kelganda yaratiladi). Lekin
+    create_one_time_invite/notify_owner/cancel_followups funksiyalari faqat
+    `context.bot` va `context.job_queue` ga muhtoj — shuning uchun shu ikki
+    atributni "soxta" obyekt orqali beramiz, boshqa kodni ozgartirish shart emas.
+    """
+
+    def __init__(self, application: Application):
+        self.bot = application.bot
+        self.job_queue = application.job_queue
+
+
+async def on_payme_paid(application: Application, chat_id: int, order_id: int):
+    """Payme PerformTransaction muvaffaqiyatli bolganda chaqiriladi (avtomatik)."""
+    ctx = _FakeContext(application)
+    name = db_get_first_name(chat_id)
+
+    invite_link = await create_one_time_invite(ctx, chat_id, name)
+    if not invite_link:
+        invite_link = CHANNEL_LINK
+
+    if invite_link:
+        note = (
+            "\n\n⚠️ Diqqat: bu havola FAQAT SIZ uchun va 1 marta ishlaydi."
+        )
+        text = (
+            "✅ Tabriklaymiz! Payme orqali to'lovingiz avtomatik tasdiqlandi.\n\n"
+            "Yopiq kanalga qo'shilish uchun havola:\n"
+            f"{invite_link}\n\n"
+            f"Kanalda 3 ta amaliy dars sizni kutmoqda 🙌{note}"
+        )
+    else:
+        text = (
+            "✅ To'lovingiz Payme orqali qabul qilindi!\n\n"
+            "Kanal linki tez orada yuboriladi 🙌"
+        )
+
+    try:
+        await application.bot.send_message(chat_id=chat_id, text=text)
+        conversations[chat_id].append({"role": "assistant", "content": text})
+        db_add_message(chat_id, "assistant", text)
+    except Exception:
+        logger.exception(f"Payme: mijozga xabar yuborilmadi (chat_id={chat_id})")
+
+    db_mark_paid(chat_id)
+    cancel_followups(ctx, chat_id)
+
+    await notify_owner(
+        ctx,
+        header="💳 PAYME orqali TO'LOV qabul qilindi (AVTOMATIK)",
+        body=(
+            f"👤 Chat ID: {chat_id}\n"
+            f"Ism: {name or 'nomalum'}\n"
+            f"Buyurtma: #{order_id}\n\n"
+            f"Kanal linki mijozga avtomatik yuborildi, tasdiqlash shart emas."
+        ),
+        user_chat_id=chat_id,
+    )
+    logger.info(f"Payme: to'lov muvaffaqiyatli, chat_id={chat_id}, order_id={order_id}")
+
+
+async def on_payme_cancelled(application: Application, chat_id: int, order_id: int, reason):
+    """Payme CancelTransaction chaqirilganda (bekor qilish/qaytarish)."""
+    ctx = _FakeContext(application)
+    try:
+        await application.bot.send_message(
+            chat_id=chat_id,
+            text="❌ To'lovingiz bekor qilindi yoki qaytarildi. Savol bo'lsa yozing 🙏",
+        )
+    except Exception:
+        logger.exception(f"Payme: bekor qilish xabari yuborilmadi (chat_id={chat_id})")
+
+    await notify_owner(
+        ctx,
+        header="❌ PAYME to'lovi BEKOR qilindi",
+        body=f"👤 Chat ID: {chat_id}\nBuyurtma: #{order_id}\nSabab kodi: {reason}",
+        user_chat_id=chat_id,
+    )
+    logger.info(f"Payme: bekor qilindi, chat_id={chat_id}, order_id={order_id}, reason={reason}")
 
 
 # =========================================================================
@@ -1262,14 +1384,22 @@ async def restore_pending_followups(app: Application):
     logger.info(f"Kutayotgan follow-up'lar tiklandi: {restored}")
 
 
-def main():
-    db_init()  # SQLite jadvallarni yaratish
+async def main():
+    db_init()             # SQLite jadvallarni yaratish (asosiy bot)
+    payme_merchant.db_init()  # Payme uchun qo'shimcha jadvallar
 
     app = (
         Application.builder()
         .token(BOT_TOKEN)
         .post_init(restore_pending_followups)
         .build()
+    )
+
+    # Payme callbacklarini ulaymiz - to'lov/bekor qilish hodisalari shu Application
+    # orqali (uning .bot va .job_queue) ishlaydi
+    payme_merchant.set_callbacks(
+        on_paid=functools.partial(on_payme_paid, app),
+        on_cancel=functools.partial(on_payme_cancelled, app),
     )
 
     # Buyruqlar
@@ -1300,10 +1430,31 @@ def main():
     # Oddiy matn (Claude bilan suhbat)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat))
 
-    logger.info(f"Bot ishga tushdi. OWNER_CHAT_ID={OWNER_CHAT_ID}")
-    print("✅ Bot ishga tushdi. Ctrl+C to'xtatish uchun.")
-    app.run_polling()
+    # ---- Payme Merchant API webhook (aiohttp) ----
+    # Railway "web" processiga PORT muhit ozgaruvchisini avtomatik beradi.
+    from aiohttp import web
+
+    web_app = web.Application()
+    web_app.add_routes([web.post("/pay", payme_merchant.payme_webhook)])
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", "8000"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+
+    logger.info(f"Bot ishga tushmoqda. OWNER_CHAT_ID={OWNER_CHAT_ID}, Payme webhook port={port}")
+    print("✅ Bot va Payme webhook ishga tushdi. Ctrl+C to'xtatish uchun.")
+
+    async with app:
+        await app.start()
+        await app.updater.start_polling()
+        await site.start()
+        try:
+            await asyncio.Event().wait()  # doimiy ishlab turadi (Ctrl+C bosilguncha)
+        finally:
+            await app.updater.stop()
+            await app.stop()
+            await runner.cleanup()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
