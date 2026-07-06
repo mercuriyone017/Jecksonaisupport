@@ -30,6 +30,7 @@ from telegram.ext import (
 )
 
 import payme_merchant
+import click_merchant
 
 # =========================================================================
 # SOZLAMALAR (Environment Variables)
@@ -1205,24 +1206,33 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.warning(f"To'lov rasmini yuborishda xatolik: {e}")
 
-        # Payme AVTOMATIK tolov tugmasi - real checkout havolasi bilan
+        # Payme va Click AVTOMATIK tolov tugmalari - real checkout havolalari bilan
         if send_payme_button:
             try:
                 order_id = payme_merchant.create_order(
                     chat_id=update.effective_chat.id, amount_sum=PRICE_PER_SALE
                 )
                 checkout_url = payme_merchant.build_checkout_url(order_id)
+
+                click_order_id = click_merchant.create_order(
+                    chat_id=update.effective_chat.id, amount_sum=PRICE_PER_SALE
+                )
+                click_url = click_merchant.build_checkout_url(click_order_id)
+
                 keyboard = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("💳 Payme orqali avtomatik to'lash", url=checkout_url)]]
+                    [
+                        [InlineKeyboardButton("💳 Payme orqali avtomatik to'lash", url=checkout_url)],
+                        [InlineKeyboardButton("💳 Click orqali avtomatik to'lash", url=click_url)],
+                    ]
                 )
                 await update.message.reply_text(
-                    "👆 Yoki quyidagi tugma orqali Payme'da xavfsiz va avtomatik to'lang. "
+                    "👆 Yoki quyidagi tugmalar orqali xavfsiz va avtomatik to'lang. "
                     "To'lov o'tgach kanal linki darhol keladi:",
                     reply_markup=keyboard,
                 )
-                logger.info(f"Payme buyurtma yaratildi: order_id={order_id}, chat_id={update.effective_chat.id}")
+                logger.info(f"Payme/Click buyurtma yaratildi: order_id={order_id}/{click_order_id}, chat_id={update.effective_chat.id}")
             except Exception as e:
-                logger.exception(f"Payme tugmasini yaratishda xatolik: {e}")
+                logger.exception(f"Tolov tugmalarini yaratishda xatolik: {e}")
 
         # Egaga xabar (ega ozini test qilsa yubormaymiz)
         if user_id != OWNER_CHAT_ID:
@@ -1272,7 +1282,7 @@ class _FakeContext:
 
 
 async def on_payme_paid(application: Application, chat_id: int, order_id: int):
-    """Payme PerformTransaction muvaffaqiyatli bolganda chaqiriladi (avtomatik)."""
+    """Payme/Click tolov muvaffaqiyatli bolganda chaqiriladi (avtomatik)."""
     ctx = _FakeContext(application)
     name = db_get_first_name(chat_id)
 
@@ -1285,14 +1295,14 @@ async def on_payme_paid(application: Application, chat_id: int, order_id: int):
             "\n\n⚠️ Diqqat: bu havola FAQAT SIZ uchun va 1 marta ishlaydi."
         )
         text = (
-            "✅ Tabriklaymiz! Payme orqali to'lovingiz avtomatik tasdiqlandi.\n\n"
+            "✅ Tabriklaymiz! To'lovingiz avtomatik tasdiqlandi.\n\n"
             "Yopiq kanalga qo'shilish uchun havola:\n"
             f"{invite_link}\n\n"
             f"Kanalda 3 ta amaliy dars sizni kutmoqda 🙌{note}"
         )
     else:
         text = (
-            "✅ To'lovingiz Payme orqali qabul qilindi!\n\n"
+            "✅ To'lovingiz qabul qilindi!\n\n"
             "Kanal linki tez orada yuboriladi 🙌"
         )
 
@@ -1301,14 +1311,14 @@ async def on_payme_paid(application: Application, chat_id: int, order_id: int):
         conversations[chat_id].append({"role": "assistant", "content": text})
         db_add_message(chat_id, "assistant", text)
     except Exception:
-        logger.exception(f"Payme: mijozga xabar yuborilmadi (chat_id={chat_id})")
+        logger.exception(f"To'lov: mijozga xabar yuborilmadi (chat_id={chat_id})")
 
     db_mark_paid(chat_id)
     cancel_followups(ctx, chat_id)
 
     await notify_owner(
         ctx,
-        header="💳 PAYME orqali TO'LOV qabul qilindi (AVTOMATIK)",
+        header="💳 TO'LOV qabul qilindi (AVTOMATIK)",
         body=(
             f"👤 Chat ID: {chat_id}\n"
             f"Ism: {name or 'nomalum'}\n"
@@ -1317,11 +1327,11 @@ async def on_payme_paid(application: Application, chat_id: int, order_id: int):
         ),
         user_chat_id=chat_id,
     )
-    logger.info(f"Payme: to'lov muvaffaqiyatli, chat_id={chat_id}, order_id={order_id}")
+    logger.info(f"To'lov muvaffaqiyatli, chat_id={chat_id}, order_id={order_id}")
 
 
 async def on_payme_cancelled(application: Application, chat_id: int, order_id: int, reason):
-    """Payme CancelTransaction chaqirilganda (bekor qilish/qaytarish)."""
+    """Payme/Click bekor qilinganda (bekor qilish/qaytarish)."""
     ctx = _FakeContext(application)
     try:
         await application.bot.send_message(
@@ -1329,15 +1339,15 @@ async def on_payme_cancelled(application: Application, chat_id: int, order_id: i
             text="❌ To'lovingiz bekor qilindi yoki qaytarildi. Savol bo'lsa yozing 🙏",
         )
     except Exception:
-        logger.exception(f"Payme: bekor qilish xabari yuborilmadi (chat_id={chat_id})")
+        logger.exception(f"To'lov: bekor qilish xabari yuborilmadi (chat_id={chat_id})")
 
     await notify_owner(
         ctx,
-        header="❌ PAYME to'lovi BEKOR qilindi",
+        header="❌ TO'LOV BEKOR qilindi",
         body=f"👤 Chat ID: {chat_id}\nBuyurtma: #{order_id}\nSabab kodi: {reason}",
         user_chat_id=chat_id,
     )
-    logger.info(f"Payme: bekor qilindi, chat_id={chat_id}, order_id={order_id}, reason={reason}")
+    logger.info(f"Bekor qilindi, chat_id={chat_id}, order_id={order_id}, reason={reason}")
 
 
 # =========================================================================
@@ -1402,6 +1412,13 @@ async def main():
         on_cancel=functools.partial(on_payme_cancelled, app),
     )
 
+    # Click uchun ham xuddi shu callbacklarni ulaymiz (kanal ochish logikasi bir xil)
+    click_merchant.db_init()
+    click_merchant.set_callbacks(
+        on_paid=functools.partial(on_payme_paid, app),
+        on_cancel=functools.partial(on_payme_cancelled, app),
+    )
+
     # Buyruqlar
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("reset", cmd_reset))
@@ -1430,19 +1447,23 @@ async def main():
     # Oddiy matn (Claude bilan suhbat)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat))
 
-    # ---- Payme Merchant API webhook (aiohttp) ----
+    # ---- Payme/Click Merchant API webhooklari (aiohttp) ----
     # Railway "web" processiga PORT muhit ozgaruvchisini avtomatik beradi.
     from aiohttp import web
 
     web_app = web.Application()
-    web_app.add_routes([web.post("/pay", payme_merchant.payme_webhook)])
+    web_app.add_routes([
+        web.post("/pay", payme_merchant.payme_webhook),
+        web.post("/click/prepare", click_merchant.click_prepare_webhook),
+        web.post("/click/complete", click_merchant.click_complete_webhook),
+    ])
     runner = web.AppRunner(web_app)
     await runner.setup()
     port = int(os.environ.get("PORT", "8000"))
     site = web.TCPSite(runner, "0.0.0.0", port)
 
-    logger.info(f"Bot ishga tushmoqda. OWNER_CHAT_ID={OWNER_CHAT_ID}, Payme webhook port={port}")
-    print("✅ Bot va Payme webhook ishga tushdi. Ctrl+C to'xtatish uchun.")
+    logger.info(f"Bot ishga tushmoqda. OWNER_CHAT_ID={OWNER_CHAT_ID}, webhook port={port}")
+    print("✅ Bot va Payme/Click webhook ishga tushdi. Ctrl+C to'xtatish uchun.")
 
     async with app:
         await app.start()
