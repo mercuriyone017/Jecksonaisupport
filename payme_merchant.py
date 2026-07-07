@@ -601,6 +601,34 @@ async def payme_webhook(request):
                 status=200,
             )
 
+        if method == "AdminCreateOrder":
+            admin_token = str(params.get("admin_token", ""))
+            if not PAYME_ADMIN_TOKEN or not hmac.compare_digest(admin_token, PAYME_ADMIN_TOKEN):
+                return web.json_response(
+                    {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_INSUFFICIENT_PRIVILEGE, {"ru": "Доступ запрещён", "uz": "Ruxsat yoq", "en": "Access denied"}).as_rpc_error()},
+                    status=200,
+                )
+            try:
+                amount_sum = float(params.get("amount_sum", 39000))
+            except (TypeError, ValueError):
+                amount_sum = 39000
+            chat_id = params.get("chat_id", 0)
+            try:
+                chat_id = int(chat_id)
+            except (TypeError, ValueError):
+                chat_id = 0
+            new_order_id = create_order(chat_id, amount_sum)
+            _conn_check = _conn()
+            try:
+                new_order = _get_order(_conn_check, new_order_id)
+                new_amount = new_order["amount"] if new_order else int(round(amount_sum * 100))
+            finally:
+                _conn_check.close()
+            return web.json_response(
+                {"jsonrpc": "2.0", "id": request_id, "result": {"order_id": new_order_id, "amount": new_amount}},
+                status=200,
+            )
+
         if method == "AdminResetOrder":
             admin_token = str(params.get("admin_token", ""))
             if not PAYME_ADMIN_TOKEN or not hmac.compare_digest(admin_token, PAYME_ADMIN_TOKEN):
