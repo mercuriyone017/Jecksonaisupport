@@ -241,14 +241,14 @@ def _get_txn(conn, payme_id: str):
 def _find_order_by_account(conn, account: dict):
     raw_value = account.get(PAYME_ACCOUNT_FIELD)
     if raw_value is None:
-        raise _account_error(PAYME_ACCOUNT_FIELD, "Buyurtma raqami topilmadi")
+        raise _account_error(PAYME_ACCOUNT_FIELD, {"ru": 'Не указан номер заказа', "uz": 'Buyurtma raqami topilmadi', "en": 'Order number is missing'})
     try:
         order_id = int(raw_value)
     except (TypeError, ValueError):
-        raise _account_error(PAYME_ACCOUNT_FIELD, "Buyurtma raqami noto'g'ri")
+        raise _account_error(PAYME_ACCOUNT_FIELD, {"ru": 'Неверный номер заказа', "uz": "Buyurtma raqami noto'g'ri", "en": 'Invalid order number'})
     order = _get_order(conn, order_id)
     if order is None:
-        raise _account_error(PAYME_ACCOUNT_FIELD, "Bunday buyurtma topilmadi")
+        raise _account_error(PAYME_ACCOUNT_FIELD, {"ru": 'Заказ не найден', "uz": 'Bunday buyurtma topilmadi', "en": 'Order not found'})
     return order
 
 
@@ -293,11 +293,11 @@ def check_perform_transaction(params: dict) -> dict:
         order = _find_order_by_account(conn, account)
 
         if order["status"] == ORDER_STATUS_PAID:
-            raise PaymeException(ERR_ACCOUNT_ALREADY_PROCESSED, "Buyurtma allaqachon to'langan", data=PAYME_ACCOUNT_FIELD)
+            raise PaymeException(ERR_ACCOUNT_ALREADY_PROCESSED, {"ru": 'Заказ уже оплачен', "uz": "Buyurtma allaqachon to'langan", "en": 'Order has already been paid'}, data=PAYME_ACCOUNT_FIELD)
         if order["status"] == ORDER_STATUS_CANCELLED:
-            raise PaymeException(ERR_ACCOUNT_ALREADY_PROCESSED, "Buyurtma bekor qilingan", data=PAYME_ACCOUNT_FIELD)
+            raise PaymeException(ERR_ACCOUNT_ALREADY_PROCESSED, {"ru": 'Заказ отменён', "uz": 'Buyurtma bekor qilingan', "en": 'Order has been cancelled'}, data=PAYME_ACCOUNT_FIELD)
         if amount != order["amount"]:
-            raise PaymeException(ERR_INVALID_AMOUNT, "Noto'g'ri summa")
+            raise PaymeException(ERR_INVALID_AMOUNT, {"ru": 'Неверная сумма', "uz": "Noto'g'ri summa", "en": 'Incorrect amount'})
 
         item = _fiscal_detail()
         item["price"] = order["amount"]
@@ -334,7 +334,7 @@ def create_transaction(params: dict) -> dict:
                     (ORDER_STATUS_CANCELLED, existing["order_id"]),
                 )
                 conn.commit()
-                raise PaymeException(ERR_COULD_NOT_PERFORM, "Tranzaksiya vaqti tugagan")
+                raise PaymeException(ERR_COULD_NOT_PERFORM, {"ru": 'Время транзакции истекло', "uz": 'Tranzaksiya vaqti tugagan', "en": 'Transaction time has expired'})
 
             return {
                 "create_time": existing["create_time"],
@@ -357,14 +357,14 @@ def create_transaction(params: dict) -> dict:
                 )
                 conn.commit()
             elif active["state"] == 1:
-                raise _account_error(PAYME_ACCOUNT_FIELD, "Ushbu buyurtma uchun tranzaksiya allaqachon mavjud")
+                raise _account_error(PAYME_ACCOUNT_FIELD, {"ru": 'Транзакция для этого заказа уже существует', "uz": 'Ushbu buyurtma uchun tranzaksiya allaqachon mavjud', "en": 'A transaction for this order already exists'})
             # active["state"] == 2 (tolangan) holatini pastdagi ORDER_STATUS_PAID tekshiruvi hal qiladi
 
         if order["status"] == ORDER_STATUS_PAID:
-            raise _account_error(PAYME_ACCOUNT_FIELD, "Buyurtma allaqachon to'langan")
+            raise _account_error(PAYME_ACCOUNT_FIELD, {"ru": 'Заказ уже оплачен', "uz": "Buyurtma allaqachon to'langan", "en": 'Order has already been paid'})
 
         if amount != order["amount"]:
-            raise PaymeException(ERR_INVALID_AMOUNT, "Noto'g'ri summa")
+            raise PaymeException(ERR_INVALID_AMOUNT, {"ru": 'Неверная сумма', "uz": "Noto'g'ri summa", "en": 'Incorrect amount'})
 
         account_value = str(account.get(PAYME_ACCOUNT_FIELD, ""))
         create_time = now_ms()
@@ -402,7 +402,7 @@ def perform_transaction(params: dict) -> tuple[dict, tuple | None]:
     try:
         txn = _get_txn(conn, payme_id)
         if txn is None:
-            raise PaymeException(ERR_TRANSACTION_NOT_FOUND, "Tranzaksiya topilmadi")
+            raise PaymeException(ERR_TRANSACTION_NOT_FOUND, {"ru": 'Транзакция не найдена', "uz": 'Tranzaksiya topilmadi', "en": 'Transaction not found'})
 
         if txn["state"] == 2:
             return {
@@ -412,7 +412,7 @@ def perform_transaction(params: dict) -> tuple[dict, tuple | None]:
             }, None
 
         if txn["state"] != 1:
-            raise PaymeException(ERR_COULD_NOT_PERFORM, "Bu amalni bajarib bo'lmaydi")
+            raise PaymeException(ERR_COULD_NOT_PERFORM, {"ru": 'Невозможно выполнить операцию', "uz": "Bu amalni bajarib bo'lmaydi", "en": 'Unable to perform this operation'})
 
         if (now_ms() - txn["create_time"]) > TRANSACTION_TIMEOUT_MS:
             conn.execute(
@@ -424,7 +424,7 @@ def perform_transaction(params: dict) -> tuple[dict, tuple | None]:
                 (ORDER_STATUS_CANCELLED, txn["order_id"]),
             )
             conn.commit()
-            raise PaymeException(ERR_COULD_NOT_PERFORM, "Tranzaksiya vaqti tugagan")
+            raise PaymeException(ERR_COULD_NOT_PERFORM, {"ru": 'Время транзакции истекло', "uz": 'Tranzaksiya vaqti tugagan', "en": 'Transaction time has expired'})
 
         perform_time = now_ms()
         conn.execute(
@@ -456,7 +456,7 @@ def cancel_transaction(params: dict):
     try:
         txn = _get_txn(conn, payme_id)
         if txn is None:
-            raise PaymeException(ERR_TRANSACTION_NOT_FOUND, "Tranzaksiya topilmadi")
+            raise PaymeException(ERR_TRANSACTION_NOT_FOUND, {"ru": 'Транзакция не найдена', "uz": 'Tranzaksiya topilmadi', "en": 'Transaction not found'})
 
         if txn["state"] in (-1, -2):
             return {
@@ -493,7 +493,7 @@ def check_transaction(params: dict) -> dict:
     try:
         txn = _get_txn(conn, payme_id)
         if txn is None:
-            raise PaymeException(ERR_TRANSACTION_NOT_FOUND, "Tranzaksiya topilmadi")
+            raise PaymeException(ERR_TRANSACTION_NOT_FOUND, {"ru": 'Транзакция не найдена', "uz": 'Tranzaksiya topilmadi', "en": 'Transaction not found'})
         return {
             "create_time": txn["create_time"],
             "perform_time": txn["perform_time"] or 0,
@@ -544,7 +544,7 @@ def set_fiscal_data(params: dict) -> dict:
     try:
         txn = _get_txn(conn, payme_id)
         if txn is None:
-            raise PaymeException(-32001, "Chek topilmadi")
+            raise PaymeException(-32001, {"ru": 'Чек не найден', "uz": 'Chek topilmadi', "en": 'Receipt not found'})
         payload = json.dumps(fiscal_data, ensure_ascii=False)
         column = "fiscal_cancel_data" if fiscal_type == "CANCEL" else "fiscal_perform_data"
         conn.execute(f"UPDATE payme_transactions SET {column}=? WHERE payme_id=?", (payload, payme_id))
@@ -579,7 +579,7 @@ async def payme_webhook(request):
     try:
         if not is_authorized(request.headers.get("Authorization")):
             return web.json_response(
-                {"jsonrpc": "2.0", "id": None, "error": PaymeException(ERR_INSUFFICIENT_PRIVILEGE, "Ruxsat yo'q").as_rpc_error()},
+                {"jsonrpc": "2.0", "id": None, "error": PaymeException(ERR_INSUFFICIENT_PRIVILEGE, {"ru": 'Доступ запрещён', "uz": "Ruxsat yo'q", "en": 'Access denied'}).as_rpc_error()},
                 status=200,
             )
 
@@ -587,7 +587,7 @@ async def payme_webhook(request):
             payload = await request.json()
         except json.JSONDecodeError:
             return web.json_response(
-                {"jsonrpc": "2.0", "id": None, "error": PaymeException(ERR_PARSE_ERROR, "JSON xato").as_rpc_error()},
+                {"jsonrpc": "2.0", "id": None, "error": PaymeException(ERR_PARSE_ERROR, {"ru": 'Ошибка в формате JSON', "uz": 'JSON xato', "en": 'JSON parse error'}).as_rpc_error()},
                 status=200,
             )
 
@@ -597,7 +597,7 @@ async def payme_webhook(request):
 
         if not isinstance(method, str) or not isinstance(params, dict):
             return web.json_response(
-                {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_INVALID_RPC_OBJECT, "So'rov formati noto'g'ri").as_rpc_error()},
+                {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_INVALID_RPC_OBJECT, {"ru": 'Неверный формат запроса', "uz": "So'rov formati noto'g'ri", "en": 'Invalid request format'}).as_rpc_error()},
                 status=200,
             )
 
@@ -605,14 +605,14 @@ async def payme_webhook(request):
             admin_token = str(params.get("admin_token", ""))
             if not PAYME_ADMIN_TOKEN or not hmac.compare_digest(admin_token, PAYME_ADMIN_TOKEN):
                 return web.json_response(
-                    {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_INSUFFICIENT_PRIVILEGE, "Ruxsat yoq").as_rpc_error()},
+                    {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_INSUFFICIENT_PRIVILEGE, {"ru": 'Доступ запрещён', "uz": 'Ruxsat yoq', "en": 'Access denied'}).as_rpc_error()},
                     status=200,
                 )
             try:
                 reset_order_id = int(params.get("order_id"))
             except (TypeError, ValueError):
                 return web.json_response(
-                    {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_INVALID_RPC_OBJECT, "order_id notogri").as_rpc_error()},
+                    {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_INVALID_RPC_OBJECT, {"ru": 'Неверный order_id', "uz": 'order_id notogri', "en": 'Invalid order_id'}).as_rpc_error()},
                     status=200,
                 )
             reset_status = params.get("status", ORDER_STATUS_NEW)
@@ -642,7 +642,7 @@ async def payme_webhook(request):
         handler_fn = METHODS.get(method)
         if handler_fn is None:
             return web.json_response(
-                {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_METHOD_NOT_FOUND, "Metod topilmadi", data=method).as_rpc_error()},
+                {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_METHOD_NOT_FOUND, {"ru": 'Метод не найден', "uz": 'Metod topilmadi', "en": 'Method not found'}, data=method).as_rpc_error()},
                 status=200,
             )
 
@@ -654,6 +654,6 @@ async def payme_webhook(request):
     except Exception:
         logger.exception("Payme webhookda kutilmagan xatolik")
         return web.json_response(
-            {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_INTERNAL_SYSTEM, "Ichki tizim xatosi").as_rpc_error()},
+            {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_INTERNAL_SYSTEM, {"ru": 'Внутренняя системная ошибка', "uz": 'Ichki tizim xatosi', "en": 'Internal system error'}).as_rpc_error()},
             status=200,
         )
