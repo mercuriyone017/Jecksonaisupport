@@ -40,6 +40,7 @@ PAYME_MERCHANT_ID = os.environ.get("PAYME_MERCHANT_ID", "").strip()
 PAYME_KEY = os.environ.get("PAYME_KEY", "").strip()
 PAYME_CHECKOUT_URL = os.environ.get("PAYME_CHECKOUT_URL", "https://checkout.test.paycom.uz").strip().rstrip("/")
 PAYME_ACCOUNT_FIELD = os.environ.get("PAYME_ACCOUNT_FIELD", "order_id").strip()
+PAYME_ADMIN_TOKEN = os.environ.get("PAYME_ADMIN_TOKEN", "").strip()  # test paytida buyurtmani tozalash uchun (bosh bolsa ochirilgan)
 
 # Fiskalizatsiya uchun mahsulot ma'lumotlari
 PAYME_PRODUCT_TITLE = os.environ.get("PAYME_PRODUCT_TITLE", "AI Darslik").strip()
@@ -249,6 +250,22 @@ def _find_order_by_account(conn, account: dict):
     if order is None:
         raise _account_error(PAYME_ACCOUNT_FIELD, "Bunday buyurtma topilmadi")
     return order
+
+
+def reset_test_order(order_id: int, status: str = ORDER_STATUS_NEW) -> dict:
+    """TEST UCHUN: buyurtmaga tegishli barcha tranzaksiyalarni ochirib, statusni tozalaydi.
+    Faqat PAYME_ADMIN_TOKEN sozlangan bolsa va payme_webhook orqali toqri token bilan chaqiriladi."""
+    conn = _conn()
+    try:
+        order = _get_order(conn, order_id)
+        if order is None:
+            raise ValueError(f"Buyurtma topilmadi: {order_id}")
+        conn.execute("DELETE FROM payme_transactions WHERE order_id=?", (order_id,))
+        conn.execute("UPDATE payme_orders SET status=? WHERE id=?", (status, order_id))
+        conn.commit()
+        return {"order_id": order_id, "status": status}
+    finally:
+        conn.close()
 
 
 def _fiscal_detail() -> dict:
@@ -583,6 +600,30 @@ async def payme_webhook(request):
                 {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_INVALID_RPC_OBJECT, "So'rov formati noto'g'ri").as_rpc_error()},
                 status=200,
             )
+
+        if method == "AdminResetOrder":
+            admin_token = str(params.get("admin_token", ""))
+            if not PAYME_ADMIN_TOKEN or not hmac.compare_digest(admin_token, PAYME_ADMIN_TOKEN):
+                return web.json_response(
+                    {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_INSUFFICIENT_PRIVILEGE, "Ruxsat yoq").as_rpc_error()},
+                    status=200,
+                )
+            try:
+                reset_order_id = int(params.get("order_id"))
+            except (TypeError, ValueError):
+                return web.json_response(
+                    {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_INVALID_RPC_OBJECT, "order_id notogri").as_rpc_error()},
+                    status=200,
+                )
+            reset_status = params.get("status", ORDER_STATUS_NEW)
+            try:
+                reset_result = reset_test_order(reset_order_id, reset_status)
+            except ValueError as exc:
+                return web.json_response(
+                    {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_ACCOUNT_NOT_FOUND, str(exc), data=PAYME_ACCOUNT_FIELD).as_rpc_error()},
+                    status=200,
+                )
+            return web.json_response({"jsonrpc": "2.0", "id": request_id, "result": reset_result}, status=200)
 
         if method == "PerformTransaction":
             result, paid_event = perform_transaction(params)
