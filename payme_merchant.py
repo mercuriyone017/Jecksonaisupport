@@ -562,7 +562,7 @@ async def payme_webhook(request):
     try:
         if not is_authorized(request.headers.get("Authorization")):
             return web.json_response(
-                {"id": None, "error": PaymeException(ERR_INSUFFICIENT_PRIVILEGE, "Ruxsat yo'q").as_rpc_error()},
+                {"jsonrpc": "2.0", "id": None, "error": PaymeException(ERR_INSUFFICIENT_PRIVILEGE, "Ruxsat yo'q").as_rpc_error()},
                 status=200,
             )
 
@@ -570,7 +570,7 @@ async def payme_webhook(request):
             payload = await request.json()
         except json.JSONDecodeError:
             return web.json_response(
-                {"id": None, "error": PaymeException(ERR_PARSE_ERROR, "JSON xato").as_rpc_error()},
+                {"jsonrpc": "2.0", "id": None, "error": PaymeException(ERR_PARSE_ERROR, "JSON xato").as_rpc_error()},
                 status=200,
             )
 
@@ -580,7 +580,7 @@ async def payme_webhook(request):
 
         if not isinstance(method, str) or not isinstance(params, dict):
             return web.json_response(
-                {"id": request_id, "error": PaymeException(ERR_INVALID_RPC_OBJECT, "So'rov formati noto'g'ri").as_rpc_error()},
+                {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_INVALID_RPC_OBJECT, "So'rov formati noto'g'ri").as_rpc_error()},
                 status=200,
             )
 
@@ -589,30 +589,30 @@ async def payme_webhook(request):
             if paid_event and _on_paid_callback:
                 chat_id, order_id = paid_event
                 await _on_paid_callback(chat_id, order_id)
-            return web.json_response({"id": request_id, "result": result}, status=200)
+            return web.json_response({"jsonrpc": "2.0", "id": request_id, "result": result}, status=200)
 
         if method == "CancelTransaction":
             result, cancel_event = cancel_transaction(params)
             if cancel_event and _on_cancel_callback:
                 chat_id, order_id, reason = cancel_event
                 await _on_cancel_callback(chat_id, order_id, reason)
-            return web.json_response({"id": request_id, "result": result}, status=200)
+            return web.json_response({"jsonrpc": "2.0", "id": request_id, "result": result}, status=200)
 
         handler_fn = METHODS.get(method)
         if handler_fn is None:
             return web.json_response(
-                {"id": request_id, "error": PaymeException(ERR_METHOD_NOT_FOUND, "Metod topilmadi", data=method).as_rpc_error()},
+                {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_METHOD_NOT_FOUND, "Metod topilmadi", data=method).as_rpc_error()},
                 status=200,
             )
 
         result = handler_fn(params)
-        return web.json_response({"id": request_id, "result": result}, status=200)
+        return web.json_response({"jsonrpc": "2.0", "id": request_id, "result": result}, status=200)
 
     except PaymeException as exc:
-        return web.json_response({"id": request_id, "error": exc.as_rpc_error()}, status=200)
+        return web.json_response({"jsonrpc": "2.0", "id": request_id, "error": exc.as_rpc_error()}, status=200)
     except Exception:
         logger.exception("Payme webhookda kutilmagan xatolik")
         return web.json_response(
-            {"id": request_id, "error": PaymeException(ERR_INTERNAL_SYSTEM, "Ichki tizim xatosi").as_rpc_error()},
+            {"jsonrpc": "2.0", "id": request_id, "error": PaymeException(ERR_INTERNAL_SYSTEM, "Ichki tizim xatosi").as_rpc_error()},
             status=200,
         )
