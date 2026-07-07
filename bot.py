@@ -64,7 +64,10 @@ _PAYMENT_METHODS_LABEL = "Click yoki Payme" if PAYME_ENABLED else "Click"
 # Sozlash: dumaloq videoni botga (OWNER sifatida) yuboring — bot avtomatik
 # file_id'ni qaytaradi (pastda handle_owner_video_note funksiyasiga qarang).
 # Olingan ID'ni Railway'ga INTRO_VIDEO_NOTE_FILE_ID env variable sifatida qo'shing.
-INTRO_VIDEO_NOTE_FILE_ID = os.environ.get("INTRO_VIDEO_NOTE_FILE_ID", "").strip()
+INTRO_VIDEO_NOTE_FILE_ID = os.environ.get(
+    "INTRO_VIDEO_NOTE_FILE_ID",
+    "DQACAgIAAxkBAAICdGpM_aKr7yAMdA_6ealj4XpVeEwvAAKOogAC2wlpSsQ5ZSOkcW-4PAQ",
+).strip()
 
 # Claude javobida bu marker bo'lsa, Click va Payme AVTOMATIK to'lov tugmalari (real
 # checkout havolalari) qayta yuboriladi. To'lov muvaffaqiyatli o'tgach (Merchant API
