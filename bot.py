@@ -3,8 +3,9 @@ Jeckson AI Chatbot — AI Darslik sotuvchi bot.
 
 Xususiyatlari:
 1. /start bosilganda dumaloq video (video_note) + "To'lov uchun rekvizitlar" tugmasi
-2. To'lov FAQAT avtomatik — Click va Payme Merchant API orqali (qo'lda to'lov,
-   chek/skrinshot yuborish yo'q)
+2. To'lov FAQAT avtomatik — hozircha faqat Click Merchant API orqali (Payme kassasi
+   hali faollashmagan, PAYME_ENABLED=true bilan keyinroq yoqiladi). Qo'lda to'lov,
+   chek/skrinshot yuborish yo'q.
 3. To'lov muvaffaqiyatli o'tgach — yopiq kanalga BIR MARTALIK havola avtomatik yuboriladi
 4. Savol-javoblar uchun Claude bilan tabiiy suhbat (Jeckson personasi)
 5. Ega (Asadbek) botga reply qilib mijozga to'g'ridan-to'g'ri javob yuborish
@@ -52,6 +53,13 @@ DB_PATH = os.environ.get("DB_PATH", "bot.db").strip()
 # Har bir mijoz uchun mahsulot narxi (statistika hisoblash uchun)
 PRICE_PER_SALE = 39000
 
+# Payme kassasi hali Payme tomonidan faollashtirilmagan (sandbox tasdiqlanmoqda),
+# shuning uchun hozircha VAQTINCHA o'chirilgan - faqat Click ishlaydi.
+# Payme kassa faollashgach, kod o'zgartirish SHART EMAS - Railway Variables'ga
+# PAYME_ENABLED=true qo'shib, servisni qayta ishga tushiring xolos.
+PAYME_ENABLED = os.environ.get("PAYME_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+_PAYMENT_METHODS_LABEL = "Click yoki Payme" if PAYME_ENABLED else "Click"
+
 # /start bosilganda birinchi yuboriladigan DUMALOQ VIDEO (video_note) file_id.
 # Sozlash: dumaloq videoni botga (OWNER sifatida) yuboring — bot avtomatik
 # file_id'ni qaytaradi (pastda handle_owner_video_note funksiyasiga qarang).
@@ -91,7 +99,7 @@ tugmalarini qayta yuborish.
 - Mahsulot: AI Darslik (Eco product)
 - Narxi: 39 000 som (taxminan 3 dollar)
 - Format: yopiq Telegram kanal orqali darslar
-- To'lov FAQAT avtomatik: Click yoki Payme tugmasi orqali. Qo'lda o'tkazma yo'q,
+- To'lov FAQAT avtomatik: {{PAYMENT_METHODS}} tugmasi orqali. Qo'lda o'tkazma yo'q,
   chek yoki skrinshot yuborish shart emas.
 - To'lov muvaffaqiyatli o'tgach (tizim tomonidan avtomatik tasdiqlanadi), mijozga
   yopiq kanalga BIR MARTALIK havola darhol va avtomatik yuboriladi.
@@ -107,7 +115,7 @@ bo'limiga qara). Ismini bilsang, jinsini ismidan taxmin qilib aka/opa qo'shib ch
 Agar mijoz "rekvizit", "qayta yubor", "qanday to'layman", "link bermadi" kabi
 to'lov havolasini qayta so'rasa — javobingning OXIRIGA alohida qatorda
 #TOLOV_TUGMALARI deb qo'sh. Bu marker mijozga ko'rinmaydi — buni ko'rib bot
-avtomatik ravishda Click va Payme uchun REAL checkout tugmalarini qayta yuboradi
+avtomatik ravishda {{PAYMENT_METHODS}} uchun REAL checkout tugmalarini qayta yuboradi
 (mijoz tugmani bosib to'laydi, to'lov o'tgach kanal linki avtomatik keladi).
 Markerni FAQAT shu holatda qo'sh, oddiy savol-javoblarda qo'shma.
 
@@ -138,7 +146,7 @@ BUNDAY QIL:
 → "Darslikda AI-ni amaliyotda qanday ishlatishni organasiz. Tolov qilingandan keyin kanalga qoshilib, barcha darslarni korishingiz mumkin. 🙌"
 
 "Ishonasa boladimi?"
-→ "Albatta, [ism aka/opa]. Payme yoki Click orqali rasmiy, xavfsiz va avtomatik tolov qabul qilamiz — hech qanday qo'lda tolov yo'q. ✅"
+→ "Albatta, [ism aka/opa]. {{PAYMENT_METHODS}} orqali rasmiy, xavfsiz va avtomatik tolov qabul qilamiz — hech qanday qo'lda tolov yo'q. ✅"
 
 "Keyin tolayman"
 → "Yaxshi, [ism aka/opa]. Qulay vaqtingizda tugmalar orqali tolashingiz mumkin. 🙌"
@@ -154,6 +162,7 @@ BUNDAY QIL:
 ═══════════════════════════════════════
 Sen professional sotuv menejerisan. Dostona, ishonchli, aniq. Vazifang — mijozning savollariga javob berib, kerak bo'lsa to'lov tugmalarini qayta taqdim etish.
 """
+SYSTEM_PROMPT = SYSTEM_PROMPT.replace("{{PAYMENT_METHODS}}", _PAYMENT_METHODS_LABEL)
 
 # =========================================================================
 # STATE
@@ -557,7 +566,7 @@ async def followup_reminder(context: ContextTypes.DEFAULT_TYPE):
             f"{hey}! 🙌\n\n"
             "AI Darslik haqida qo'shimcha savolingiz bormidi? "
             "Rekvizitlar hali kuchda:\n\n"
-            "💳 Payme yoki Click\n"
+            f"💳 {_PAYMENT_METHODS_LABEL}\n"
             "🔍 Mirage game club\n"
             "💰 39 000 so'm\n"
             "📝 Izohga: AI darslik\n\n"
@@ -659,14 +668,15 @@ async def build_payment_keyboard(chat_id: int) -> InlineKeyboardMarkup | None:
     """
     buttons = []
 
-    try:
-        payme_order_id = payme_merchant.create_order(
-            chat_id=chat_id, amount_sum=PRICE_PER_SALE
-        )
-        payme_url = payme_merchant.build_checkout_url(payme_order_id)
-        buttons.append([InlineKeyboardButton("💳 Payme orqali to'lash", url=payme_url)])
-    except Exception as e:
-        logger.exception(f"Payme checkout yaratilmadi (chat_id={chat_id}): {e}")
+    if PAYME_ENABLED:
+        try:
+            payme_order_id = payme_merchant.create_order(
+                chat_id=chat_id, amount_sum=PRICE_PER_SALE
+            )
+            payme_url = payme_merchant.build_checkout_url(payme_order_id)
+            buttons.append([InlineKeyboardButton("💳 Payme orqali to'lash", url=payme_url)])
+        except Exception as e:
+            logger.exception(f"Payme checkout yaratilmadi (chat_id={chat_id}): {e}")
 
     try:
         click_order_id = click_merchant.create_order(
@@ -684,12 +694,12 @@ async def build_payment_keyboard(chat_id: int) -> InlineKeyboardMarkup | None:
 
 PAYMENT_DETAILS_TEXT = (
     "💰 Narx: {price:,} so'm\n\n"
-    "Pastdagi tugmalardan birini tanlab, Click yoki Payme orqali xavfsiz va "
+    "Pastdagi tugmalardan birini tanlab, {methods} orqali xavfsiz va "
     "avtomatik to'lang.\n\n"
     "✅ To'lov o'tgach yopiq kanalga BIR MARTALIK havola darhol avtomatik yuboriladi.\n"
     "❌ Qo'lda o'tkazma yo'q, chek yoki skrinshot yuborish shart emas.\n\n"
     "Savol bo'lsa bemalol yozing — javob beraman 🙌"
-).format(price=PRICE_PER_SALE)
+).format(price=PRICE_PER_SALE, methods=_PAYMENT_METHODS_LABEL)
 
 
 # =========================================================================
@@ -1177,7 +1187,8 @@ async def restore_pending_followups(app: Application):
 
 async def main():
     db_init()                 # SQLite jadvallarni yaratish (asosiy bot)
-    payme_merchant.db_init()  # Payme uchun qo'shimcha jadvallar
+    if PAYME_ENABLED:
+        payme_merchant.db_init()  # Payme uchun qo'shimcha jadvallar
     click_merchant.db_init()  # Click uchun qo'shimcha jadvallar
 
     app = (
@@ -1187,12 +1198,13 @@ async def main():
         .build()
     )
 
-    # Payme callbacklarini ulaymiz - to'lov/bekor qilish hodisalari shu Application
-    # orqali (uning .bot va .job_queue) ishlaydi
-    payme_merchant.set_callbacks(
-        on_paid=functools.partial(on_payme_paid, app),
-        on_cancel=functools.partial(on_payme_cancelled, app),
-    )
+    # Payme callbacklarini ulaymiz (FAQAT PAYME_ENABLED=true bolsa) - to'lov/bekor
+    # qilish hodisalari shu Application orqali (uning .bot va .job_queue) ishlaydi
+    if PAYME_ENABLED:
+        payme_merchant.set_callbacks(
+            on_paid=functools.partial(on_payme_paid, app),
+            on_cancel=functools.partial(on_payme_cancelled, app),
+        )
 
     # Click callbacklarini ulaymiz (xuddi Payme kabi)
     click_merchant.set_callbacks(
@@ -1235,18 +1247,24 @@ async def main():
     from aiohttp import web
 
     web_app = web.Application()
-    web_app.add_routes([
-        web.post("/pay", payme_merchant.payme_webhook),
+    routes = [
         web.post("/click/prepare", click_merchant.click_prepare_webhook),
         web.post("/click/complete", click_merchant.click_complete_webhook),
-    ])
+    ]
+    if PAYME_ENABLED:
+        routes.append(web.post("/pay", payme_merchant.payme_webhook))
+    web_app.add_routes(routes)
     runner = web.AppRunner(web_app)
     await runner.setup()
     port = int(os.environ.get("PORT", "8000"))
     site = web.TCPSite(runner, "0.0.0.0", port)
 
-    logger.info(f"Bot ishga tushmoqda. OWNER_CHAT_ID={OWNER_CHAT_ID}, webhook port={port}")
-    print("✅ Bot, Payme va Click webhooklari ishga tushdi. Ctrl+C to'xtatish uchun.")
+    logger.info(
+        f"Bot ishga tushmoqda. OWNER_CHAT_ID={OWNER_CHAT_ID}, webhook port={port}, "
+        f"PAYME_ENABLED={PAYME_ENABLED}"
+    )
+    payme_status = "Payme va Click" if PAYME_ENABLED else "Click (Payme hozircha ochirilgan)"
+    print(f"✅ Bot va {payme_status} webhooklari ishga tushdi. Ctrl+C to'xtatish uchun.")
 
     async with app:
         await app.start()
