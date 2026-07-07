@@ -50,7 +50,7 @@ PAYME_PRODUCT_VAT_PERCENT = int(os.environ.get("PAYME_PRODUCT_VAT_PERCENT", "15"
 # Bot bilan bitta SQLite faylni bo'lishamiz
 DB_PATH = os.environ.get("DB_PATH", "bot.db").strip()
 
-TRANSACTION_TIMEOUT_MS = 43_200_000  # 12 soat (Payme protokoli talabi)
+TRANSACTION_TIMEOUT_MS = int(os.environ.get("PAYME_TRANSACTION_TIMEOUT_MS", "43200000"))  # 12 soat (Payme protokoli talabi, test uchun Railway Variables orqali qisqartirish mumkin)
 
 ORDER_STATUS_NEW = "new"
 ORDER_STATUS_WAITING = "waiting_payment"
@@ -332,7 +332,16 @@ def create_transaction(params: dict) -> dict:
             (order["id"],),
         ).fetchone()
         if active is not None:
-            raise _account_error(PAYME_ACCOUNT_FIELD, "Ushbu buyurtma uchun tranzaksiya allaqachon mavjud")
+            if active["state"] == 1 and (now_ms() - active["create_time"]) > TRANSACTION_TIMEOUT_MS:
+                # Eskirgan (12 soatdan oshgan) tugallanmagan tranzaksiya - avtomatik bekor qilib, yangisiga yol beramiz
+                conn.execute(
+                    "UPDATE payme_transactions SET state=-1, reason=4, cancel_time=? WHERE payme_id=?",
+                    (now_ms(), active["payme_id"]),
+                )
+                conn.commit()
+            elif active["state"] == 1:
+                raise _account_error(PAYME_ACCOUNT_FIELD, "Ushbu buyurtma uchun tranzaksiya allaqachon mavjud")
+            # active["state"] == 2 (tolangan) holatini pastdagi ORDER_STATUS_PAID tekshiruvi hal qiladi
 
         if order["status"] == ORDER_STATUS_PAID:
             raise _account_error(PAYME_ACCOUNT_FIELD, "Buyurtma allaqachon to'langan")
