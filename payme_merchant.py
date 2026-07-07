@@ -327,15 +327,7 @@ def create_transaction(params: dict) -> dict:
 
         order = _find_order_by_account(conn, account)
 
-       active = conn.execute(
-            "SELECT * FROM payme_transactions WHERE order_id=? AND state IN (1,2)",
-            (order["id"],),
-        ).fetchone()
-        if active is not None:
-            raise _account_error(PAYME_ACCOUNT_FIELD, "Ushbu buyurtma uchun tranzaksiya allaqachon mavjud")
-
-        if order["status"] == ORDER_STATUS_PAID:
-            raise _account_error(PAYME_ACCOUNT_FIELD, "Buyurtma allaqachon to'langan")active = conn.execute(
+        active = conn.execute(
             "SELECT * FROM payme_transactions WHERE order_id=? AND state IN (1,2)",
             (order["id"],),
         ).fetchone()
