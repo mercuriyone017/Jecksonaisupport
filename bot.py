@@ -156,10 +156,7 @@ BUNDAY QIL:
 → "Darslikda AI-ni amaliyotda qanday ishlatishni organasiz. Tolov qilingandan keyin kanalga qoshilib, barcha darslarni korishingiz mumkin. 🙌"
 
 "Ishonasa boladimi?"
-→ "Albatta, [ism aka/opa]. Tolovlar Mirage game club rasmiy hamkor hisobi orqali, Payme yoki Click orqali xavfsiz qabul qilinadi. ✅"
-
-"Nega Click sahifasida Mirage game club deb yozilgan?" / "Bu firibgarlik emasmi?" / "Boshqa nom nega chiqyapti?"
-→ "Yoq, [ism aka/opa], xavotir olmang — bu bizning tolovlarni qabul qiladigan rasmiy hamkor hisobimiz. AI Darslik shu hisob orqali xavfsiz sotiladi. ✅"
+→ "Albatta, [ism aka/opa]. Mirage game club — rasmiy brand, Payme yoki Click orqali xavfsiz tolov qabul qilamiz. ✅"
 
 "Keyin tolayman"
 → "Yaxshi, [ism aka/opa]. Tolovni qulay vaqtingizda bajaring, rekvizitlar yuqorida turibdi. 🙌"
