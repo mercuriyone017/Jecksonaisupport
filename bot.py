@@ -2,18 +2,16 @@
 Jeckson AI Chatbot — AI Darslik sotuvchi bot.
 
 Xususiyatlari:
-1. /start bosilganda dumaloq video (video_note) + "To'lov uchun rekvizitlar" tugmasi
-2. To'lov FAQAT avtomatik — hozircha faqat Click Merchant API orqali (Payme kassasi
-   hali faollashmagan, PAYME_ENABLED=true bilan keyinroq yoqiladi). Qo'lda to'lov,
-   chek/skrinshot yuborish yo'q.
-3. To'lov muvaffaqiyatli o'tgach — yopiq kanalga BIR MARTALIK havola avtomatik yuboriladi
-4. Savol-javoblar uchun Claude bilan tabiiy suhbat (Jeckson personasi)
-5. Ega (Asadbek) botga reply qilib mijozga to'g'ridan-to'g'ri javob yuborish
-6. Har bir yangi mijoz va xabar egaga xabar sifatida keladi
+1. Claude bilan tabiiy suhbat (Jeckson personasi)
+2. Chek rasmini Vision orqali tekshirish (chek/oddiy rasm)
+3. Chekda "AI darslik" yozuvi borligini tekshirish
+4. Ega (Asadbek) botga reply qilib mijozga to'g'ridan-to'g'ri javob yuborish
+5. Har bir yangi mijoz va xabar egaga xabar sifatida keladi
 """
 
 import os
 import re
+import base64
 import sqlite3
 import asyncio
 import functools
@@ -32,7 +30,6 @@ from telegram.ext import (
 )
 
 import payme_merchant
-import click_merchant
 
 # =========================================================================
 # SOZLAMALAR (Environment Variables)
@@ -53,27 +50,18 @@ DB_PATH = os.environ.get("DB_PATH", "bot.db").strip()
 # Har bir mijoz uchun mahsulot narxi (statistika hisoblash uchun)
 PRICE_PER_SALE = 39000
 
-# Payme kassasi hali Payme tomonidan faollashtirilmagan (sandbox tasdiqlanmoqda),
-# shuning uchun hozircha VAQTINCHA o'chirilgan - faqat Click ishlaydi.
-# Payme kassa faollashgach, kod o'zgartirish SHART EMAS - Railway Variables'ga
-# PAYME_ENABLED=true qo'shib, servisni qayta ishga tushiring xolos.
-PAYME_ENABLED = os.environ.get("PAYME_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
-_PAYMENT_METHODS_LABEL = "Click yoki Payme" if PAYME_ENABLED else "Click"
+# To'lov ko'rsatmalari rasmi (Payme sahifasining screenshoti)
+# Sozlash: rasmni botga yuboring, /getphotoid buyrug'i bilan file_id oling,
+# uni Railway'ga PAYMENT_IMAGE_FILE_ID env variable sifatida qo'shing.
+PAYMENT_IMAGE_FILE_ID = os.environ.get("PAYMENT_IMAGE_FILE_ID", "").strip()
 
-# /start bosilganda birinchi yuboriladigan DUMALOQ VIDEO (video_note) file_id.
-# Sozlash: dumaloq videoni botga (OWNER sifatida) yuboring — bot avtomatik
-# file_id'ni qaytaradi (pastda handle_owner_video_note funksiyasiga qarang).
-# Olingan ID'ni Railway'ga INTRO_VIDEO_NOTE_FILE_ID env variable sifatida qo'shing.
-INTRO_VIDEO_NOTE_FILE_ID = os.environ.get(
-    "INTRO_VIDEO_NOTE_FILE_ID",
-    "DQACAgIAAxkBAAICdGpM_aKr7yAMdA_6ealj4XpVeEwvAAKOogAC2wlpSsQ5ZSOkcW-4PAQ",
-).strip()
+# Claude javobida bu marker bo'lsa, javob bilan birga to'lov rasmi ham yuboriladi
+PAY_IMG_MARKER = "#TOLOV_RASMI"
 
-# Claude javobida bu marker bo'lsa, Click va Payme AVTOMATIK to'lov tugmalari (real
-# checkout havolalari) qayta yuboriladi. To'lov muvaffaqiyatli o'tgach (Merchant API
-# orqali), mijozga kanal linki avtomatik yuboriladi — hech qanday qo'lda tasdiqlash,
-# chek yoki skrinshot kerak emas.
-PAYMENT_BUTTONS_MARKER = "#TOLOV_TUGMALARI"
+# Claude javobida bu marker bo'lsa, Payme orqali AVTOMATIK to'lov tugmasi (real checkout
+# havolasi) ham yuboriladi. To'lov Payme serverida tasdiqlangach (PerformTransaction),
+# mijozga kanal linki avtomatik yuboriladi - ega tasdiqlashi shart emas.
+PAYME_LINK_MARKER = "#PAYME_TOLOV"
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -90,11 +78,8 @@ Sen tirik odamsan — bot, AI, chatbot yoki suniy intellekt EMAS. Mijoz sen botm
 ═══════════════════════════════════════
 # SENING VAZIFANG (ENG MUHIM)
 ═══════════════════════════════════════
-Mijoz botga /start bosganda unga avtomatik ravishda tanishtiruv videosi va
-"To'lov uchun rekvizitlar" tugmasi allaqachon yuborilgan bo'ladi — bu qadamlarni
-SEN emas, kod boshqaradi. Sening vazifang — mijoz savol-javob yozganda unga
-tabiiy, ishonchli va qisqa javob berish, hamda kerak bo'lganda to'lov
-tugmalarini qayta yuborish.
+Landing sahifadan kelgan mijozni AI Darslik kursiga royxatdan otkazish va tolovni qabul qilish.
+Har bir mijoz bilan aniq bir izchillikda ishlaysan. Sen — savdo menejerisan, boshqa mavzuga chalgima.
 
 ═══════════════════════════════════════
 # MAHSULOT HAQIDA
@@ -102,25 +87,48 @@ tugmalarini qayta yuborish.
 - Mahsulot: AI Darslik (Eco product)
 - Narxi: 39 000 som (taxminan 3 dollar)
 - Format: yopiq Telegram kanal orqali darslar
-- To'lov FAQAT avtomatik: {{PAYMENT_METHODS}} tugmasi orqali. Qo'lda o'tkazma yo'q,
-  chek yoki skrinshot yuborish shart emas.
-- To'lov muvaffaqiyatli o'tgach (tizim tomonidan avtomatik tasdiqlanadi), mijozga
-  yopiq kanalga BIR MARTALIK havola darhol va avtomatik yuboriladi.
+- Tolovdan keyin mijozga kanal linki yuboriladi
 
 ═══════════════════════════════════════
-# SUHBAT QOIDALARI
+# SUHBAT IZCHILLIGI
 ═══════════════════════════════════════
 
-Mijoz savol bersa — qisqa, tabiiy va ishonchli javob ber (pastdagi "TIPIK SAVOLLAR"
-bo'limiga qara). Ismini bilsang, jinsini ismidan taxmin qilib aka/opa qo'shib chaqir
-(Erkak ismi → aka, Ayol ismi → opa, aniq bilmasang — faqat ism bilan).
+## 1-QADAM — Salomlashish va ism sorash
+Mijoz salomlashsa yoki oddiy xabar yozsa:
 
-Agar mijoz "rekvizit", "qayta yubor", "qanday to'layman", "link bermadi" kabi
-to'lov havolasini qayta so'rasa — javobingning OXIRIGA alohida qatorda
-#TOLOV_TUGMALARI deb qo'sh. Bu marker mijozga ko'rinmaydi — buni ko'rib bot
-avtomatik ravishda {{PAYMENT_METHODS}} uchun REAL checkout tugmalarini qayta yuboradi
-(mijoz tugmani bosib to'laydi, to'lov o'tgach kanal linki avtomatik keladi).
-Markerni FAQAT shu holatda qo'sh, oddiy savol-javoblarda qo'shma.
+"Assalomu alaykum! 🙌 Darslikka qiziqish bildirganingizdan hursandmiz.
+Mening ismim — Jeckson, shu darslikning sotuv menejeriman.
+Sizni kim deb chaqirsam boladi? (agar oldin ro'yhatdan o'tgan bo'lsa ismini aytasan srazu"
+
+## 2-QADAM — Ismini bilib olgach, tolov rekvizitlarini ber
+Mijoz ismini yozgach, jinsini ismidan taxmin qil:
+- Erkak ismi bolsa → aka qosh (Aziz aka, Bekzod aka)
+- Ayol ismi bolsa → opa qosh (Nilufar opa, Malika opa)
+- Aniq bilolmasak — faqat ism bilan chaqir
+
+Keyin bunday yoz:
+
+"Juda yaxshi, [ism aka/opa]! 🙌
+
+Tolov qilish uchun 2 xil yol bor:
+
+1) Pastdagi tugma orqali Payme'da AVTOMATIK tolash — tolov otgach darhol kanal linki keladi ✅
+2) Yoki Click ilovasidan qolda tolab, chek rasmini shu yerga yuborish (biroz vaqt olishi mumkin)
+
+Summa: 39 000 som
+
+ℹ️ Click orqali tolayotganda tolov sahifasida Mirage game club nomi korinishi mumkin — bu bizning rasmiy hamkor hisobimiz, xavotir olmang ✅
+
+#TOLOV_RASMI
+#PAYME_TOLOV"
+
+MUHIM TEXNIK QOIDA: Tolov korsatmalarini birinchi marta yozganingda javob oxiriga alohida qatorlarda #TOLOV_RASMI va #PAYME_TOLOV deb qosh. Bu ikkalasi ham mijozga korinmaydi:
+- #TOLOV_RASMI ni korib bot avtomatik Payme/Click qolda tolov korsatmasi rasmini ilova qiladi.
+- #PAYME_TOLOV ni korib bot avtomatik ravishda REAL Payme tolov tugmasini (checkout havolasi) yaratib yuboradi — mijoz shu tugmani bosib karta malumotlarini kiritib tolaydi, tolov muvaffaqiyatli otgach kanal linki AVTOMATIK yuboriladi.
+Faqat DASTLABKI tolov korsatmalarida shu ikkala markerni qosh. Boshqa savol-javoblarga (masalan "kim otadi?", "keyin tolayman" kabi) markerlarni qoshma.
+
+## 3-QADAM — Chek kelganda
+Mijoz chek yuborganda avtomatik javob keladi. Sen ham "Rahmat, [ism]! Tez orada aloqaga chiqamiz" degan uslubda tasdiqla.
 
 ═══════════════════════════════════════
 # QATIY QOIDALAR
@@ -132,13 +140,12 @@ BUNDAY QILMA:
 - Bir vaqtda 3-4 ta savol berma
 - Chegirma, bepul dars va uydirma vada berma
 - Darslik ichida nima borligini uydirma
-- Hech qachon qo'lda to'lov yoki chek/skrinshot yuborishni taklif qilma
 
 BUNDAY QIL:
 - Dostona, iliq, ishonchli ohang
 - Qisqa jumlalar, aniq va tushunarli
 - Mijoz ismini bilgach — har javobda ism bilan (aka/opa qoshib) chaqir
-- Emoji orinli va kam ishlat (🙌 ✅ 💳 💰)
+- Emoji orinli va kam ishlat (🙌 ✅ 💳 💰 📝 🔍)
 - Mijoz ikkilansa — muloyim javob berib, tolovga davat et
 
 ═══════════════════════════════════════
@@ -149,23 +156,22 @@ BUNDAY QIL:
 → "Darslikda AI-ni amaliyotda qanday ishlatishni organasiz. Tolov qilingandan keyin kanalga qoshilib, barcha darslarni korishingiz mumkin. 🙌"
 
 "Ishonasa boladimi?"
-→ "Albatta, [ism aka/opa]. {{PAYMENT_METHODS}} orqali rasmiy, xavfsiz va avtomatik tolov qabul qilamiz — hech qanday qo'lda tolov yo'q. ✅"
+→ "Albatta, [ism aka/opa]. Tolovlar Mirage game club rasmiy hamkor hisobi orqali, Payme yoki Click orqali xavfsiz qabul qilinadi. ✅"
+
+"Nega Click sahifasida Mirage game club deb yozilgan?" / "Bu firibgarlik emasmi?" / "Boshqa nom nega chiqyapti?"
+→ "Yoq, [ism aka/opa], xavotir olmang — bu bizning tolovlarni qabul qiladigan rasmiy hamkor hisobimiz. AI Darslik shu hisob orqali xavfsiz sotiladi. ✅"
 
 "Keyin tolayman"
-→ "Yaxshi, [ism aka/opa]. Qulay vaqtingizda tugmalar orqali tolashingiz mumkin. 🙌"
+→ "Yaxshi, [ism aka/opa]. Tolovni qulay vaqtingizda bajaring, rekvizitlar yuqorida turibdi. 🙌"
 
 "Chegirma bormi?"
 → "Narx eng qulay holida — 39 000 som, [ism aka/opa]. 🙌"
 
-"Savolim bor" / "yordam kerak"
-→ "Albatta, [ism aka/opa]! Savolingizni yozing, men shu yerdaman va yordam beraman 🙌"
-
 ═══════════════════════════════════════
 # ESLATMA
 ═══════════════════════════════════════
-Sen professional sotuv menejerisan. Dostona, ishonchli, aniq. Vazifang — mijozning savollariga javob berib, kerak bo'lsa to'lov tugmalarini qayta taqdim etish.
+Sen professional sotuv menejerisan. Dostona, ishonchli, aniq. Vazifang — mijozni tolovga olib borish va chekni qabul qilish.
 """
-SYSTEM_PROMPT = SYSTEM_PROMPT.replace("{{PAYMENT_METHODS}}", _PAYMENT_METHODS_LABEL)
 
 # =========================================================================
 # STATE
@@ -236,6 +242,15 @@ def db_init():
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS receipts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_chat_id INTEGER,
+                is_valid INTEGER,
+                has_ai_darslik INTEGER,
+                confirmed INTEGER DEFAULT 0,
+                verify_info TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
         conn.commit()
@@ -414,6 +429,25 @@ def db_mark_followup_sent(followup_id: int):
         conn.close()
 
 
+def db_save_receipt(
+    user_chat_id: int,
+    is_valid: bool,
+    has_ai_darslik: bool,
+    verify_info: str,
+) -> int:
+    conn = db_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO receipts (user_chat_id, is_valid, has_ai_darslik, verify_info) "
+            "VALUES (?, ?, ?, ?)",
+            (user_chat_id, int(is_valid), int(has_ai_darslik), verify_info),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
 def db_stats() -> dict:
     """Umumiy statistika: bugun, hafta, jami."""
     conn = db_conn()
@@ -439,6 +473,10 @@ def db_stats() -> dict:
             "WHERE date(paid_at) >= date('now', '-7 days')"
         ).fetchone()["n"]
 
+        total_receipts = c(
+            "SELECT COUNT(*) as n FROM receipts WHERE is_valid=1"
+        ).fetchone()["n"]
+
         conv = (paid_users / total_users * 100) if total_users else 0
 
         return {
@@ -448,6 +486,7 @@ def db_stats() -> dict:
             "today_paid": today_paid,
             "week_users": week_users,
             "week_paid": week_paid,
+            "total_receipts": total_receipts,
             "revenue_today": today_paid * PRICE_PER_SALE,
             "revenue_week": week_paid * PRICE_PER_SALE,
             "revenue_total": paid_users * PRICE_PER_SALE,
@@ -532,6 +571,22 @@ async def create_one_time_invite(
         return None
 
 
+def build_confirm_buttons(user_chat_id: int) -> InlineKeyboardMarkup:
+    """Chek tasdiqlash uchun 2 ta tugma yasaydi."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Tasdiqlash", callback_data=f"confirm:{user_chat_id}"
+                ),
+                InlineKeyboardButton(
+                    "❌ Rad etish", callback_data=f"reject:{user_chat_id}"
+                ),
+            ]
+        ]
+    )
+
+
 def extract_user_id(text: str | None) -> int | None:
     """Bildirishnoma matnidan UID:xxxxx belgisini topib, foydalanuvchi ID sini qaytarish."""
     if not text:
@@ -569,7 +624,7 @@ async def followup_reminder(context: ContextTypes.DEFAULT_TYPE):
             f"{hey}! 🙌\n\n"
             "AI Darslik haqida qo'shimcha savolingiz bormidi? "
             "Rekvizitlar hali kuchda:\n\n"
-            f"💳 {_PAYMENT_METHODS_LABEL}\n"
+            "💳 Payme yoki Click\n"
             "🔍 Mirage game club\n"
             "💰 39 000 so'm\n"
             "📝 Izohga: AI darslik\n\n"
@@ -661,48 +716,60 @@ def cancel_followups(context: ContextTypes.DEFAULT_TYPE, user_id: int):
 
 
 # =========================================================================
-# TO'LOV TUGMALARI (Click + Payme avtomatik checkout)
+# CHEK TEKSHIRUV (Claude Vision)
 # =========================================================================
 
-async def build_payment_keyboard(chat_id: int) -> InlineKeyboardMarkup | None:
+async def verify_receipt(image_bytes: bytes) -> tuple[bool, bool, str]:
     """
-    Payme va Click uchun REAL checkout buyurtmalari yaratadi va ikkalasiga
-    ham havola tugmasini qaytaradi. Ikkisi ham ishlamasa None qaytaradi.
+    Rasmni Vision orqali tekshirish.
+    Qaytaradi: (chek_ekanmi, ai_darslik_yozilganmi, tolik_izoh)
     """
-    buttons = []
-
-    if PAYME_ENABLED:
-        try:
-            payme_order_id = payme_merchant.create_order(
-                chat_id=chat_id, amount_sum=PRICE_PER_SALE
-            )
-            payme_url = payme_merchant.build_checkout_url(payme_order_id)
-            buttons.append([InlineKeyboardButton("💳 Payme orqali to'lash", url=payme_url)])
-        except Exception as e:
-            logger.exception(f"Payme checkout yaratilmadi (chat_id={chat_id}): {e}")
-
     try:
-        click_order_id = click_merchant.create_order(
-            chat_id=chat_id, amount_sum=PRICE_PER_SALE
+        image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+        response = client.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=400,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": image_b64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "Bu rasm tolov cheki (kvitansiya)mi?\n"
+                            "Payme, Click, Uzum, Humo yoki boshqa tolov tizimidan olingan chek bolishi mumkin.\n\n"
+                            "Yana muhim: chekda AI darslik yoki AI Darslik yoki AI DARSLIK yoki ai darslik "
+                            "degan matn (izoh, ismi yoki maqsad qismida) bor-yoqligini alohida tekshir.\n\n"
+                            "FAQAT quyidagi formatda javob ber:\n"
+                            "CHEK: HA yoki YOQ\n"
+                            "SUMMA: [korilgan summa yoki aniqmas]\n"
+                            "AI_DARSLIK: HA yoki YOQ\n"
+                            "IZOH: [1 gap izoh]"
+                        ),
+                    },
+                ],
+            }],
         )
-        click_url = click_merchant.build_checkout_url(click_order_id)
-        buttons.append([InlineKeyboardButton("💳 Click orqali to'lash", url=click_url)])
+        text = ""
+        for block in response.content:
+            if getattr(block, "type", None) == "text":
+                text = block.text
+                break
+
+        is_receipt = bool(re.search(r"CHEK:\s*HA", text, re.IGNORECASE))
+        has_ai_darslik = bool(re.search(r"AI_DARSLIK:\s*HA", text, re.IGNORECASE))
+        return is_receipt, has_ai_darslik, text
+
     except Exception as e:
-        logger.exception(f"Click checkout yaratilmadi (chat_id={chat_id}): {e}")
-
-    if not buttons:
-        return None
-    return InlineKeyboardMarkup(buttons)
-
-
-PAYMENT_DETAILS_TEXT = (
-    "💰 Narx: {price:,} so'm\n\n"
-    "Pastdagi tugmalardan birini tanlab, {methods} orqali xavfsiz va "
-    "avtomatik to'lang.\n\n"
-    "✅ To'lov o'tgach yopiq kanalga BIR MARTALIK havola darhol avtomatik yuboriladi.\n"
-    "❌ Qo'lda o'tkazma yo'q, chek yoki skrinshot yuborish shart emas.\n\n"
-    "Savol bo'lsa bemalol yozing — javob beraman 🙌"
-).format(price=PRICE_PER_SALE, methods=_PAYMENT_METHODS_LABEL)
+        logger.exception(f"verify_receipt FAILED: {e}")
+        return True, False, f"Tekshirib bolmadi: {e}"
 
 
 # =========================================================================
@@ -710,37 +777,17 @@ PAYMENT_DETAILS_TEXT = (
 # =========================================================================
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mijoz /start bosganda: 1) dumaloq video, 2) 'To'lov uchun rekvizitlar' tugmasi."""
+    """Mijoz /start bosganda."""
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
     conversations[user_id] = []
     db_upsert_user(update)
     db_clear_conversation(user_id)
 
-    # 1) Dumaloq tanishtiruv videosi (agar sozlangan bolsa)
-    if INTRO_VIDEO_NOTE_FILE_ID:
-        try:
-            await context.bot.send_video_note(
-                chat_id=chat_id, video_note=INTRO_VIDEO_NOTE_FILE_ID
-            )
-        except Exception as e:
-            logger.warning(f"Intro video_note yuborilmadi: {e}")
-    else:
-        logger.warning(
-            "INTRO_VIDEO_NOTE_FILE_ID sozlanmagan — video yuborilmadi. "
-            "Dumaloq videoni ega sifatida botga yuborib file_id oling."
-        )
-
-    # 2) Salomlashish + rekvizitlar tugmasi
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("💳 To'lov uchun rekvizitlar", callback_data="show_payment")]]
-    )
     await update.message.reply_text(
         "Assalomu alaykum! 🙌\n\n"
-        "Men Jeckson — AI Darslik sotuv menejeriman.\n\n"
-        "To'lov rekvizitlarini olish uchun pastdagi tugmani bosing. "
-        "Savol bo'lsa bemalol yozing — javob beraman ✅",
-        reply_markup=keyboard,
+        "Darslikka qiziqish bildirganingizdan hursandmiz.\n\n"
+        "Mening ismim — Jeckson, shu darslikning sotuv menejeriman.\n\n"
+        "Sizni kim deb chaqirsam boladi?"
     )
 
     # Ega ozini test qilsa — unga xabar yubormaymiz
@@ -787,49 +834,119 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  ✅ To'lov: {s['week_paid']}\n"
         f"  💵 Daromad: {s['revenue_week']:,} so'm\n\n"
         f"*JAMI:*\n"
-        f"  💵 Daromad: {s['revenue_total']:,} so'm"
+        f"  💵 Daromad: {s['revenue_total']:,} so'm\n"
+        f"  🧾 Chekar (Vision): {s['total_receipts']}"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
-async def handle_show_payment_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_confirm_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Mijoz "💳 To'lov uchun rekvizitlar" tugmasini bosganda.
-    Click va Payme uchun REAL avtomatik checkout tugmalarini yuboradi — qo'lda
-    to'lov yoki chek/skrinshot talab qilinmaydi.
+    Ega ✅ Tasdiqlash yoki ❌ Rad etish tugmasini bosganda.
+    Faqat OWNER_CHAT_ID uchun ishlaydi.
     """
     query = update.callback_query
-    await query.answer()
+    await query.answer()  # Telegram'ga "tugma bosildi" javobi
 
-    chat_id = update.effective_chat.id
-    keyboard = await build_payment_keyboard(chat_id)
-
-    if keyboard is None:
-        text = (
-            PAYMENT_DETAILS_TEXT
-            + "\n\n⚠️ Hozircha to'lov havolasi yaratilmadi, birozdan so'ng "
-            "qayta urinib ko'ring yoki shu yerga yozing."
+    # Xavfsizlik: faqat ega bosishi mumkin
+    if update.effective_user.id != OWNER_CHAT_ID:
+        await query.edit_message_text(
+            (query.message.text or "") + "\n\n⚠️ Faqat ega tugmani bosishi mumkin."
         )
-        await query.message.reply_text(text)
         return
 
-    await query.message.reply_text(PAYMENT_DETAILS_TEXT, reply_markup=keyboard)
-    logger.info(f"show_payment: rekvizitlar yuborildi, chat_id={chat_id}")
-
-
-async def handle_owner_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Ega dumaloq video (video_note) yuborganda — file_id'ni qaytaradi.
-    Buni INTRO_VIDEO_NOTE_FILE_ID environment variable sifatida qo'shing.
-    """
-    vn = update.message.video_note
-    if not vn:
+    data = query.data or ""
+    if ":" not in data:
         return
-    await update.message.reply_text(
-        f"🎥 video_note file_id:\n\n`{vn.file_id}`\n\n"
-        f"Uni Railway'ga INTRO_VIDEO_NOTE_FILE_ID nomi bilan qo'shing.",
-        parse_mode="Markdown",
-    )
+    action, uid_str = data.split(":", 1)
+    try:
+        user_chat_id = int(uid_str)
+    except ValueError:
+        return
+
+    if action == "confirm":
+        # Mijoz ismini olishga urinamiz (state'dan)
+        user_name = user_state.get(user_chat_id, {}).get("first_name", "")
+
+        # 1) BIR MARTALIK link yaratishga urinamiz (bot admin bolsa)
+        invite_link = await create_one_time_invite(context, user_chat_id, user_name)
+        is_one_time = invite_link is not None
+
+        # 2) Bulmasa — oddiy fallback linkka o'tamiz
+        if not invite_link:
+            invite_link = CHANNEL_LINK
+
+        # 3) Mijozga xabar
+        if invite_link:
+            note = (
+                "\n\n⚠️ Diqqat: bu havola FAQAT SIZ uchun va 1 marta ishlaydi. "
+                "Boshqa hech kim bu link orqali qoshila olmaydi."
+                if is_one_time
+                else ""
+            )
+            link_msg = (
+                "Tabriklaymiz! 🎉 To'lovingiz tasdiqlandi.\n\n"
+                "Yopiq kanalga qo'shilish uchun havola:\n"
+                f"{invite_link}\n\n"
+                "Kanalda 3 ta amaliy dars sizni kutmoqda 🙌\n"
+                f"Xayrli o'rganishlar!{note}"
+            )
+        else:
+            link_msg = (
+                "Tabriklaymiz! 🎉 To'lovingiz tasdiqlandi.\n\n"
+                "Yopiq kanal linki tez orada Asadbek tomonidan yuboriladi 🙌"
+            )
+
+        try:
+            await context.bot.send_message(chat_id=user_chat_id, text=link_msg)
+            # Mijoz suhbat tarixiga qo'shamiz
+            conversations[user_chat_id].append(
+                {"role": "assistant", "content": link_msg}
+            )
+            db_add_message(user_chat_id, "assistant", link_msg)
+            # To'lov TASDIQLANDI — bazaga belgilaymiz + follow-uplarni bekor qilamiz
+            db_mark_paid(user_chat_id)
+            cancel_followups(context, user_chat_id)
+
+            # Egaga xabar (tugmalarni olib tashlab)
+            link_type = "BIR MARTALIK" if is_one_time else "oddiy (fallback)"
+            await query.edit_message_text(
+                (query.message.text or "")
+                + f"\n\n✅ TASDIQLANDI — kanal linki yuborildi.\n"
+                f"🔗 Link turi: {link_type}\n"
+                f"📎 {invite_link or 'link yoq'}"
+            )
+            logger.info(f"confirm: link sent to user={user_chat_id}, type={link_type}")
+        except Exception as e:
+            logger.exception(f"confirm failed: {e}")
+            await query.edit_message_text(
+                (query.message.text or "")
+                + f"\n\n❌ Xatolik: kanal linki yuborilmadi ({e})"
+            )
+
+    elif action == "reject":
+        reject_msg = (
+            "Kechirasiz, chekingizni tekshirishda muammo bo'ldi 🙈\n\n"
+            "Iltimos:\n"
+            "1) Payme yoki Click ilovasidan haqiqiy chek yuboring\n"
+            "2) Chek to'liq ko'rinishi kerak (summa, sana, oluvchi)\n"
+            "3) Izohda AI darslik yozilganini tekshiring\n\n"
+            "Savol bo'lsa yozing — yordam beraman 🙌"
+        )
+        try:
+            await context.bot.send_message(chat_id=user_chat_id, text=reject_msg)
+            conversations[user_chat_id].append(
+                {"role": "assistant", "content": reject_msg}
+            )
+            await query.edit_message_text(
+                (query.message.text or "") + "\n\n❌ RAD ETILDI — mijozga xabar berildi."
+            )
+            logger.info(f"reject: message sent to user={user_chat_id}")
+        except Exception as e:
+            logger.exception(f"reject failed: {e}")
+            await query.edit_message_text(
+                (query.message.text or "") + f"\n\n❌ Xatolik: {e}"
+            )
 
 
 async def handle_owner_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -900,6 +1017,137 @@ async def handle_owner_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
 
 
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Rasm (chek) qabul qilish va tekshirish."""
+    user_id = update.effective_user.id
+    caption = update.message.caption or ""
+
+    # Agar EGA rasmni "getid" izohi bilan yuborsa — file_id qaytaramiz
+    # (Payme sahifasining rasmini sozlash uchun)
+    if user_id == OWNER_CHAT_ID and caption.lower().strip() == "getid":
+        photo = update.message.photo[-1]
+        await update.message.reply_text(
+            f"📷 file_id:\n\n`{photo.file_id}`\n\n"
+            f"Uni Railway'ga PAYMENT_IMAGE_FILE_ID nomi bilan qo'shing.",
+            parse_mode="Markdown",
+        )
+        return
+
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id, action="typing"
+    )
+
+    # Rasmni yuklab olamiz
+    try:
+        photo = update.message.photo[-1]  # eng yuqori sifat
+        file = await context.bot.get_file(photo.file_id)
+        image_bytes = bytes(await file.download_as_bytearray())
+    except Exception as e:
+        logger.exception(f"handle_photo download failed: {e}")
+        await update.message.reply_text("Rasmni yuklab bolmadi, qaytadan yuboring 🙏")
+        return
+
+    is_receipt, has_ai_darslik, verify_info = await verify_receipt(image_bytes)
+    db_upsert_user(update)
+    db_save_receipt(user_id, is_receipt, has_ai_darslik, verify_info)
+
+    # ========== 1) CHEK EMAS ==========
+    if not is_receipt:
+        await update.message.reply_text(
+            "Bu rasm tolov chekiga oxshamayapti 🙈\n\n"
+            "Iltimos, Payme yoki Click ilovasidan olingan tolov tasdigini yuboring. "
+            "Odatda unda summa, sana va Muvaffaqiyatli degan yozuv boladi. 🙌"
+        )
+        if user_id != OWNER_CHAT_ID:
+            try:
+                await context.bot.forward_message(
+                    chat_id=OWNER_CHAT_ID,
+                    from_chat_id=update.effective_chat.id,
+                    message_id=update.message.message_id,
+                )
+            except Exception as e:
+                logger.warning(f"forward_message failed: {e}")
+
+            await notify_owner(
+                context,
+                header="⚠️ Chek EMAS rasm keldi",
+                body=(
+                    f"{format_user_info(update)}\n\n"
+                    f"📝 Izoh: {caption or 'yoq'}\n\n"
+                    f"🔍 Vision tekshiruv:\n{verify_info}\n\n"
+                    f"💡 Reply qilib mijozga yozishingiz mumkin."
+                ),
+                user_chat_id=update.effective_chat.id,
+            )
+        return
+
+    # ========== 2) CHEK, LEKIN AI DARSLIK YOZILMAGAN ==========
+    if not has_ai_darslik:
+        await update.message.reply_text(
+            "Chek keldi, rahmat! 🙌\n\n"
+            "Ammo chekda AI darslik degan yozuv topilmadi. Iltimos, tolov qilganda "
+            "izoh yoki maqsad qismiga AI darslik deb yozganingizga ishonch hosil qiling. "
+            "Agar bunday yozgan bolsangiz — tashvishlanmang, biz tez orada tekshiramiz. ✅"
+        )
+        if user_id != OWNER_CHAT_ID:
+            try:
+                await context.bot.forward_message(
+                    chat_id=OWNER_CHAT_ID,
+                    from_chat_id=update.effective_chat.id,
+                    message_id=update.message.message_id,
+                )
+            except Exception as e:
+                logger.warning(f"forward_message failed: {e}")
+
+            await notify_owner(
+                context,
+                header="⚠️ CHEK keldi (AI darslik yozuvi YOQ)",
+                body=(
+                    f"{format_user_info(update)}\n\n"
+                    f"📝 Izoh: {caption or 'yoq'}\n\n"
+                    f"🔍 Vision tekshiruv:\n{verify_info}\n\n"
+                    f"⚠️ Chek chin, lekin AI darslik yozuvi topilmadi. "
+                    f"Payme/Click'da tekshirib, tugmani bosing yoki reply qiling:"
+                ),
+                user_chat_id=update.effective_chat.id,
+                reply_markup=build_confirm_buttons(update.effective_chat.id),
+            )
+        return
+
+    # ========== 3) HAMMASI JOYIDA — CHEK + AI DARSLIK ==========
+    conversations[user_id].append(
+        {"role": "user", "content": f"[Mijoz tolov chekini yubordi. {verify_info}]"}
+    )
+
+    await update.message.reply_text(
+        "Rahmat! ✅ Chekingiz qabul qilindi.\n\n"
+        "Tolov tekshirilmoqda — 1-2 daqiqada kanal linkini yuboraman 🙌"
+    )
+    if user_id != OWNER_CHAT_ID:
+        try:
+            await context.bot.forward_message(
+                chat_id=OWNER_CHAT_ID,
+                from_chat_id=update.effective_chat.id,
+                message_id=update.message.message_id,
+            )
+        except Exception as e:
+            logger.warning(f"forward_message failed: {e}")
+
+        # Tugmalar bilan bildirishnoma
+        await notify_owner(
+            context,
+            header="💰 YANGI CHEK KELDI (AI darslik ✅)",
+            body=(
+                f"{format_user_info(update)}\n\n"
+                f"📝 Izoh: {caption or 'yoq'}\n\n"
+                f"🔍 Vision tekshiruv:\n{verify_info}\n\n"
+                f"⚡ Tolov tushganini Payme/Click'da tekshiring va tugmani bosing:"
+            ),
+            user_chat_id=update.effective_chat.id,
+            reply_markup=build_confirm_buttons(update.effective_chat.id),
+        )
+
+
 async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Oddiy matn xabarlar — Claude bilan suhbat.
@@ -936,26 +1184,50 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not reply:
             reply = "Uzr, javobda muammo boldi. Qaytadan yozing 🙏"
 
-        # #TOLOV_TUGMALARI markerini topamiz — bo'lsa Click+Payme tugmalarini qayta yuboramiz
-        resend_payment_buttons = PAYMENT_BUTTONS_MARKER in reply
-        if resend_payment_buttons:
-            reply = reply.replace(PAYMENT_BUTTONS_MARKER, "").strip()
+        # #TOLOV_RASMI markerini topamiz — bo'lsa alohida rasm yuboramiz
+        send_payment_image = PAY_IMG_MARKER in reply
+        if send_payment_image:
+            reply = reply.replace(PAY_IMG_MARKER, "").strip()
+
+        # #PAYME_TOLOV markerini topamiz — bo'lsa real Payme checkout tugmasini yuboramiz
+        send_payme_button = PAYME_LINK_MARKER in reply
+        if send_payme_button:
+            reply = reply.replace(PAYME_LINK_MARKER, "").strip()
 
         conversations[user_id].append({"role": "assistant", "content": reply})
         db_add_message(user_id, "assistant", reply)  # doimiy saqlash
 
         await update.message.reply_text(reply)
 
-        # Click va Payme AVTOMATIK to'lov tugmalari - real checkout havolalari bilan
-        if resend_payment_buttons:
-            keyboard = await build_payment_keyboard(update.effective_chat.id)
-            if keyboard:
+        # To'lov ko'rsatmalari yuborilganda — rasmni ham qo'shamiz
+        if send_payment_image and PAYMENT_IMAGE_FILE_ID:
+            try:
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=PAYMENT_IMAGE_FILE_ID,
+                    caption="👆 Payme ilovasida shunday ko'rinishi kerak",
+                )
+            except Exception as e:
+                logger.warning(f"To'lov rasmini yuborishda xatolik: {e}")
+
+        # Payme AVTOMATIK tolov tugmasi - real checkout havolasi bilan
+        if send_payme_button:
+            try:
+                order_id = payme_merchant.create_order(
+                    chat_id=update.effective_chat.id, amount_sum=PRICE_PER_SALE
+                )
+                checkout_url = payme_merchant.build_checkout_url(order_id)
+                keyboard = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("💳 Payme orqali avtomatik to'lash", url=checkout_url)]]
+                )
                 await update.message.reply_text(
-                    PAYMENT_DETAILS_TEXT, reply_markup=keyboard
+                    "👆 Yoki quyidagi tugma orqali Payme'da xavfsiz va avtomatik to'lang. "
+                    "To'lov o'tgach kanal linki darhol keladi:",
+                    reply_markup=keyboard,
                 )
-                logger.info(
-                    f"To'lov tugmalari qayta yuborildi: chat_id={update.effective_chat.id}"
-                )
+                logger.info(f"Payme buyurtma yaratildi: order_id={order_id}, chat_id={update.effective_chat.id}")
+            except Exception as e:
+                logger.exception(f"Payme tugmasini yaratishda xatolik: {e}")
 
         # Egaga xabar (ega ozini test qilsa yubormaymiz)
         if user_id != OWNER_CHAT_ID:
@@ -1074,77 +1346,6 @@ async def on_payme_cancelled(application: Application, chat_id: int, order_id: i
 
 
 # =========================================================================
-# CLICK - to'lov muvaffaqiyatli/bekor bo'lganda chaqiriladigan callbacklar
-# =========================================================================
-
-async def on_click_paid(application: Application, chat_id: int, order_id: int):
-    """Click Complete (action=1) muvaffaqiyatli bolganda chaqiriladi (avtomatik)."""
-    ctx = _FakeContext(application)
-    name = db_get_first_name(chat_id)
-
-    invite_link = await create_one_time_invite(ctx, chat_id, name)
-    if not invite_link:
-        invite_link = CHANNEL_LINK
-
-    if invite_link:
-        note = "\n\n⚠️ Diqqat: bu havola FAQAT SIZ uchun va 1 marta ishlaydi."
-        text = (
-            "✅ Tabriklaymiz! Click orqali to'lovingiz avtomatik tasdiqlandi.\n\n"
-            "Yopiq kanalga qo'shilish uchun havola:\n"
-            f"{invite_link}\n\n"
-            f"Kanalda 3 ta amaliy dars sizni kutmoqda 🙌{note}"
-        )
-    else:
-        text = (
-            "✅ To'lovingiz Click orqali qabul qilindi!\n\n"
-            "Kanal linki tez orada yuboriladi 🙌"
-        )
-
-    try:
-        await application.bot.send_message(chat_id=chat_id, text=text)
-        conversations[chat_id].append({"role": "assistant", "content": text})
-        db_add_message(chat_id, "assistant", text)
-    except Exception:
-        logger.exception(f"Click: mijozga xabar yuborilmadi (chat_id={chat_id})")
-
-    db_mark_paid(chat_id)
-    cancel_followups(ctx, chat_id)
-
-    await notify_owner(
-        ctx,
-        header="💳 CLICK orqali TO'LOV qabul qilindi (AVTOMATIK)",
-        body=(
-            f"👤 Chat ID: {chat_id}\n"
-            f"Ism: {name or 'nomalum'}\n"
-            f"Buyurtma: #{order_id}\n\n"
-            f"Kanal linki mijozga avtomatik yuborildi, tasdiqlash shart emas."
-        ),
-        user_chat_id=chat_id,
-    )
-    logger.info(f"Click: to'lov muvaffaqiyatli, chat_id={chat_id}, order_id={order_id}")
-
-
-async def on_click_cancelled(application: Application, chat_id: int, order_id: int, reason):
-    """Click tomonidan tranzaksiya bekor qilinganda (error < 0)."""
-    ctx = _FakeContext(application)
-    try:
-        await application.bot.send_message(
-            chat_id=chat_id,
-            text="❌ To'lovingiz bekor qilindi yoki qaytarildi. Savol bo'lsa yozing 🙏",
-        )
-    except Exception:
-        logger.exception(f"Click: bekor qilish xabari yuborilmadi (chat_id={chat_id})")
-
-    await notify_owner(
-        ctx,
-        header="❌ CLICK to'lovi BEKOR qilindi",
-        body=f"👤 Chat ID: {chat_id}\nBuyurtma: #{order_id}\nSabab kodi: {reason}",
-        user_chat_id=chat_id,
-    )
-    logger.info(f"Click: bekor qilindi, chat_id={chat_id}, order_id={order_id}, reason={reason}")
-
-
-# =========================================================================
 # MAIN
 # =========================================================================
 
@@ -1189,10 +1390,8 @@ async def restore_pending_followups(app: Application):
 
 
 async def main():
-    db_init()                 # SQLite jadvallarni yaratish (asosiy bot)
-    if PAYME_ENABLED:
-        payme_merchant.db_init()  # Payme uchun qo'shimcha jadvallar
-    click_merchant.db_init()  # Click uchun qo'shimcha jadvallar
+    db_init()             # SQLite jadvallarni yaratish (asosiy bot)
+    payme_merchant.db_init()  # Payme uchun qo'shimcha jadvallar
 
     app = (
         Application.builder()
@@ -1201,18 +1400,11 @@ async def main():
         .build()
     )
 
-    # Payme callbacklarini ulaymiz (FAQAT PAYME_ENABLED=true bolsa) - to'lov/bekor
-    # qilish hodisalari shu Application orqali (uning .bot va .job_queue) ishlaydi
-    if PAYME_ENABLED:
-        payme_merchant.set_callbacks(
-            on_paid=functools.partial(on_payme_paid, app),
-            on_cancel=functools.partial(on_payme_cancelled, app),
-        )
-
-    # Click callbacklarini ulaymiz (xuddi Payme kabi)
-    click_merchant.set_callbacks(
-        on_paid=functools.partial(on_click_paid, app),
-        on_cancel=functools.partial(on_click_cancelled, app),
+    # Payme callbacklarini ulaymiz - to'lov/bekor qilish hodisalari shu Application
+    # orqali (uning .bot va .job_queue) ishlaydi
+    payme_merchant.set_callbacks(
+        on_paid=functools.partial(on_payme_paid, app),
+        on_cancel=functools.partial(on_payme_cancelled, app),
     )
 
     # Buyruqlar
@@ -1220,9 +1412,9 @@ async def main():
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("stats", cmd_stats))
 
-    # "To'lov uchun rekvizitlar" tugmasi
+    # Inline tugmalar (Tasdiqlash / Rad etish)
     app.add_handler(
-        CallbackQueryHandler(handle_show_payment_button, pattern=r"^show_payment$")
+        CallbackQueryHandler(handle_confirm_button, pattern=r"^(confirm|reject):\d+$")
     )
 
     # MUHIM: Eganing reply'lari BIRINCHI ushlanishi kerak!
@@ -1237,37 +1429,25 @@ async def main():
         )
     )
 
-    # Ega dumaloq video yuborsa — file_id qaytaramiz (INTRO_VIDEO_NOTE_FILE_ID sozlash uchun)
-    app.add_handler(
-        MessageHandler(filters.VIDEO_NOTE & filters.Chat(OWNER_CHAT_ID), handle_owner_video_note)
-    )
+    # Rasm (chek)
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    # Oddiy matn (Claude bilan suhbat — savol-javoblar uchun)
+    # Oddiy matn (Claude bilan suhbat)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat))
 
-    # ---- Payme va Click Merchant API webhooklari (aiohttp) ----
+    # ---- Payme Merchant API webhook (aiohttp) ----
     # Railway "web" processiga PORT muhit ozgaruvchisini avtomatik beradi.
     from aiohttp import web
 
     web_app = web.Application()
-    routes = [
-        web.post("/click/prepare", click_merchant.click_prepare_webhook),
-        web.post("/click/complete", click_merchant.click_complete_webhook),
-    ]
-    if PAYME_ENABLED:
-        routes.append(web.post("/pay", payme_merchant.payme_webhook))
-    web_app.add_routes(routes)
+    web_app.add_routes([web.post("/pay", payme_merchant.payme_webhook)])
     runner = web.AppRunner(web_app)
     await runner.setup()
     port = int(os.environ.get("PORT", "8000"))
     site = web.TCPSite(runner, "0.0.0.0", port)
 
-    logger.info(
-        f"Bot ishga tushmoqda. OWNER_CHAT_ID={OWNER_CHAT_ID}, webhook port={port}, "
-        f"PAYME_ENABLED={PAYME_ENABLED}"
-    )
-    payme_status = "Payme va Click" if PAYME_ENABLED else "Click (Payme hozircha ochirilgan)"
-    print(f"✅ Bot va {payme_status} webhooklari ishga tushdi. Ctrl+C to'xtatish uchun.")
+    logger.info(f"Bot ishga tushmoqda. OWNER_CHAT_ID={OWNER_CHAT_ID}, Payme webhook port={port}")
+    print("✅ Bot va Payme webhook ishga tushdi. Ctrl+C to'xtatish uchun.")
 
     async with app:
         await app.start()
