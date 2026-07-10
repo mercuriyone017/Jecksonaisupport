@@ -30,6 +30,7 @@ from telegram.ext import (
 )
 
 import payme_merchant
+import click_merchant
 
 # =========================================================================
 # SOZLAMALAR (Environment Variables)
@@ -54,6 +55,10 @@ PRICE_PER_SALE = 39000
 # Sozlash: rasmni botga yuboring, /getphotoid buyrug'i bilan file_id oling,
 # uni Railway'ga PAYMENT_IMAGE_FILE_ID env variable sifatida qo'shing.
 PAYMENT_IMAGE_FILE_ID = os.environ.get("PAYMENT_IMAGE_FILE_ID", "").strip()
+
+# /start bosilganda yuboriladigan video (video note yoki oddiy video) file_id.
+# Sozlash: Railway'ga WELCOME_VIDEO_FILE_ID nomi bilan qo'shing.
+WELCOME_VIDEO_FILE_ID = os.environ.get("WELCOME_VIDEO_FILE_ID", "").strip()
 
 # Claude javobida bu marker bo'lsa, javob bilan birga to'lov rasmi ham yuboriladi
 PAY_IMG_MARKER = "#TOLOV_RASMI"
@@ -774,17 +779,39 @@ async def verify_receipt(image_bytes: bytes) -> tuple[bool, bool, str]:
 # =========================================================================
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mijoz /start bosganda."""
+    """Mijoz /start bosganda: video + Rekvizit tugma."""
     user_id = update.effective_user.id
     conversations[user_id] = []
     db_upsert_user(update)
     db_clear_conversation(user_id)
 
+    # 1) Videohabar (video note -> oddiy video fallback bilan)
+    if WELCOME_VIDEO_FILE_ID:
+        try:
+            await context.bot.send_video_note(
+                chat_id=update.effective_chat.id,
+                video_note=WELCOME_VIDEO_FILE_ID,
+            )
+        except Exception as e:
+            logger.warning(f"send_video_note failed, trying send_video: {e}")
+            try:
+                await context.bot.send_video(
+                    chat_id=update.effective_chat.id,
+                    video=WELCOME_VIDEO_FILE_ID,
+                )
+            except Exception as e2:
+                logger.warning(f"send_video ham failed: {e2}")
+
+    # 2) Salomlashish matni + Rekvizit tugma
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🧾 To'lov uchun rekvizitlar", callback_data="show_payment")]]
+    )
     await update.message.reply_text(
         "Assalomu alaykum! 🙌\n\n"
-        "Darslikka qiziqish bildirganingizdan hursandmiz.\n\n"
-        "Mening ismim — Jeckson, shu darslikning sotuv menejeriman.\n\n"
-        "Sizni kim deb chaqirsam boladi?"
+        "Men Jeckson — AI Darslik sotuv menejeriman.\n\n"
+        "To'lov rekvizitlarini olish uchun pastdagi tugmani bosing.\n"
+        "Savol bo'lsa bemalol yozing — javob beraman ✅",
+        reply_markup=keyboard,
     )
 
     # Ega ozini test qilsa — unga xabar yubormaymiz
@@ -835,6 +862,61 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  🧾 Chekar (Vision): {s['total_receipts']}"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def handle_show_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    'To'lov uchun rekvizitlar' tugmasi bosilganda:
+    Payme va Click checkout tugmalari + qisqa yo'riqnoma yuboriladi.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    chat_id = update.effective_chat.id
+    db_upsert_user(update)
+
+    payme_button = None
+    try:
+        payme_order_id = payme_merchant.create_order(chat_id=chat_id, amount_sum=PRICE_PER_SALE)
+        payme_url = payme_merchant.build_checkout_url(payme_order_id)
+        payme_button = InlineKeyboardButton("💳 Payme orqali to'lash", url=payme_url)
+        logger.info(f"Payme order yaratildi: order_id={payme_order_id}, chat_id={chat_id}")
+    except Exception as e:
+        logger.exception(f"Payme order yaratishda xatolik: {e}")
+
+    click_button = None
+    try:
+        click_order_id = click_merchant.create_order(chat_id=chat_id, amount_sum=PRICE_PER_SALE)
+        click_url = click_merchant.build_checkout_url(click_order_id)
+        click_button = InlineKeyboardButton("🧾 Click orqali to'lash", url=click_url)
+        logger.info(f"Click order yaratildi: order_id={click_order_id}, chat_id={chat_id}")
+    except Exception as e:
+        logger.exception(f"Click order yaratishda xatolik: {e}")
+
+    rows = []
+    if payme_button:
+        rows.append([payme_button])
+    if click_button:
+        rows.append([click_button])
+
+    if not rows:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Uzr, hozircha to'lov havolasini yaratib bo'lmadi 🙈 Biroz kutib qaytadan urinib ko'ring.",
+        )
+        return
+
+    keyboard = InlineKeyboardMarkup(rows)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "💰 Narx: 39,000 so'm\n\n"
+            "Pastdagi tugmalardan birini tanlab, Payme yoki Click orqali xavfsiz va avtomatik to'lang.\n\n"
+            "✅ To'lov o'tgach yopiq kanalga BIR MARTALIK havola darhol avtomatik yuboriladi.\n\n"
+            "Savol bo'lsa bemalol yozing — javob beraman 🙌"
+        ),
+        reply_markup=keyboard,
+    )
 
 
 async def handle_confirm_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1322,6 +1404,73 @@ async def on_payme_paid(application: Application, chat_id: int, order_id: int):
     logger.info(f"Payme: to'lov muvaffaqiyatli, chat_id={chat_id}, order_id={order_id}")
 
 
+async def on_click_paid(application: Application, chat_id: int, order_id: int):
+    """Click Complete webhookida to'lov muvaffaqiyatli bo'lganda chaqiriladi."""
+    ctx = _FakeContext(application)
+    name = db_get_first_name(chat_id)
+
+    invite_link = await create_one_time_invite(ctx, chat_id, name)
+    if not invite_link:
+        invite_link = CHANNEL_LINK
+
+    if invite_link:
+        note = "\n\n⚠️ Diqqat: bu havola FAQAT SIZ uchun va 1 marta ishlaydi."
+        text = (
+            "✅ Tabriklaymiz! Click orqali to'lovingiz avtomatik tasdiqlandi.\n\n"
+            "Yopiq kanalga qo'shilish uchun havola:\n"
+            f"{invite_link}\n\n"
+            f"Kanalda 3 ta amaliy dars sizni kutmoqda 🙌{note}"
+        )
+    else:
+        text = (
+            "✅ To'lovingiz Click orqali qabul qilindi!\n\n"
+            "Kanal linki tez orada yuboriladi 🙌"
+        )
+
+    try:
+        await application.bot.send_message(chat_id=chat_id, text=text)
+        conversations[chat_id].append({"role": "assistant", "content": text})
+        db_add_message(chat_id, "assistant", text)
+    except Exception:
+        logger.exception(f"Click: mijozga xabar yuborilmadi (chat_id={chat_id})")
+
+    db_mark_paid(chat_id)
+    cancel_followups(ctx, chat_id)
+
+    await notify_owner(
+        ctx,
+        header="🧾 CLICK orqali TO'LOV qabul qilindi (AVTOMATIK)",
+        body=(
+            f"👤 Chat ID: {chat_id}\n"
+            f"Ism: {name or 'nomalum'}\n"
+            f"Buyurtma: #{order_id}\n\n"
+            "Kanal linki mijozga avtomatik yuborildi, tasdiqlash shart emas."
+        ),
+        user_chat_id=chat_id,
+    )
+    logger.info(f"Click: to'lov muvaffaqiyatli, chat_id={chat_id}, order_id={order_id}")
+
+
+async def on_click_cancelled(application: Application, chat_id: int, order_id: int, reason):
+    """Click bekor / muvaffaqiyatsiz bo'lganda chaqiriladi."""
+    ctx = _FakeContext(application)
+    try:
+        await application.bot.send_message(
+            chat_id=chat_id,
+            text="❌ Click orqali to'lovingiz bekor qilindi yoki muvaffaqiyatsiz. Savol bo'lsa yozing 🙏",
+        )
+    except Exception:
+        logger.exception(f"Click: bekor qilish xabari yuborilmadi (chat_id={chat_id})")
+
+    await notify_owner(
+        ctx,
+        header="❌ CLICK to'lovi BEKOR qilindi / xato",
+        body=f"👤 Chat ID: {chat_id}\nBuyurtma: #{order_id}\nSabab: {reason}",
+        user_chat_id=chat_id,
+    )
+    logger.info(f"Click: bekor qilindi, chat_id={chat_id}, order_id={order_id}, reason={reason}")
+
+
 async def on_payme_cancelled(application: Application, chat_id: int, order_id: int, reason):
     """Payme CancelTransaction chaqirilganda (bekor qilish/qaytarish)."""
     ctx = _FakeContext(application)
@@ -1389,6 +1538,7 @@ async def restore_pending_followups(app: Application):
 async def main():
     db_init()             # SQLite jadvallarni yaratish (asosiy bot)
     payme_merchant.db_init()  # Payme uchun qo'shimcha jadvallar
+    click_merchant.db_init()  # Click uchun qo'shimcha jadvallar
 
     app = (
         Application.builder()
@@ -1404,6 +1554,12 @@ async def main():
         on_cancel=functools.partial(on_payme_cancelled, app),
     )
 
+    # Click callbacklarini ham ulaymiz
+    click_merchant.set_callbacks(
+        on_paid=functools.partial(on_click_paid, app),
+        on_cancel=functools.partial(on_click_cancelled, app),
+    )
+
     # Buyruqlar
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("reset", cmd_reset))
@@ -1412,6 +1568,11 @@ async def main():
     # Inline tugmalar (Tasdiqlash / Rad etish)
     app.add_handler(
         CallbackQueryHandler(handle_confirm_button, pattern=r"^(confirm|reject):\d+$")
+    )
+
+    # 'To\'lov uchun rekvizitlar' tugmasi
+    app.add_handler(
+        CallbackQueryHandler(handle_show_payment, pattern=r"^show_payment$")
     )
 
     # MUHIM: Eganing reply'lari BIRINCHI ushlanishi kerak!
@@ -1437,7 +1598,11 @@ async def main():
     from aiohttp import web
 
     web_app = web.Application()
-    web_app.add_routes([web.post("/pay", payme_merchant.payme_webhook)])
+    web_app.add_routes([
+        web.post("/pay", payme_merchant.payme_webhook),
+        web.post("/click/prepare", click_merchant.click_prepare_webhook),
+        web.post("/click/complete", click_merchant.click_complete_webhook),
+    ])
     runner = web.AppRunner(web_app)
     await runner.setup()
     port = int(os.environ.get("PORT", "8000"))
